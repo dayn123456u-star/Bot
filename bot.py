@@ -6,7 +6,6 @@ import re
 import sqlite3
 import requests
 import tempfile
-import urllib.parse
 import zipfile
 from datetime import date
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -379,17 +378,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await q.message.reply_text(text, parse_mode="HTML", reply_markup=models_keyboard(current_model))
 
-    elif q.data == "image_again":
-        context.user_data["image_mode"] = True
-        context.user_data["chat"] = False
-        context.user_data["voice_only"] = False
-        await q.message.reply_text(
-            "<b>Чтобы получить картинку опишите её в подробностях. 🖤</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("▪️ Отмена", callback_data="menu")]
-            ])
-        )
 
     elif q.data.startswith("setmodel_"):
         model_id = q.data.replace("setmodel_", "")
@@ -949,87 +937,11 @@ async def check_payments(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Payment check error: {e}")
 
-# ========= ГЕНЕРАЦИЯ КАРТИНОК =========
-async def image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cursor.execute("SELECT banned FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    if not row or row[0] == 1:
-        return
-    context.user_data["image_mode"] = True
-    context.user_data["chat"] = False
-    context.user_data["voice_only"] = False
-    await update.message.reply_text(
-        "<b>Чтобы получить картинку опишите её в подробностях. 🖤</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("▪️ Отмена", callback_data="menu")]
-        ])
-    )
-
-async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    cursor.execute("SELECT banned FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    if not row or row[0] == 1:
-        return
-
-    if not context.user_data.get("image_mode"):
-        return
-
-    cursor.execute("SELECT requests FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    req = row[0] if row else 0
-
-    if req <= 0:
-        await update.message.reply_text(
-            "<b>🏴‍☠️ Запросы закончились! Купи ещё или пригласи друзей.</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏴‍☠️ Купить запросы", callback_data="buy")]
-            ])
-        )
-        return
-
-    prompt = update.message.text
-    thinking_msg = await update.message.reply_text("<b>🖤 Генерирую картинку...</b>", parse_mode="HTML")
-
-    try:
-        encoded_prompt = urllib.parse.quote(prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
-
-        response = requests.get(image_url, timeout=60)
-        if response.status_code != 200:
-            raise ValueError(f"Status {response.status_code}")
-
-        cursor.execute("UPDATE users SET requests = requests - 1, total_used = total_used + 1 WHERE user_id=?", (user_id,))
-        conn.commit()
-
-        await thinking_msg.delete()
-        await update.message.reply_photo(
-            photo=response.content,
-            caption=f"<b>🖤 {html.escape(prompt)}</b>",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("▪️ Ещё картинку", callback_data="image_again")],
-                [InlineKeyboardButton("▪️ В меню", callback_data="menu")]
-            ])
-        )
-
-    except Exception as e:
-        logger.error(f"Image gen error: {e}")
-        await thinking_msg.delete()
-        await update.message.reply_text(
-            "<b>🖤 Не смог сгенерировать. Попробуй другой промт.</b>",
-            parse_mode="HTML"
-        )
 
 # ========= ЗАПУСК =========
 async def post_init(application):
     await application.bot.set_my_commands([
         ("start",    "Главное меню"),
-        ("image",    "Генерация картинки по описанию"),
         ("promo",    "Активировать промокод"),
         ("buy_100",  "Купить 100 запросов — 1 USDT"),
         ("buy_300",  "Купить 300 запросов — 2.5 USDT"),
@@ -1040,7 +952,6 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("image", image_cmd))
     app.add_handler(CommandHandler("promo", promo))
     app.add_handler(CommandHandler("buy_100", buy_100))
     app.add_handler(CommandHandler("buy_300", buy_300))
@@ -1055,7 +966,6 @@ def main():
 
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_image), group=0)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat), group=1)
 
     app.job_queue.run_repeating(check_payments, interval=15)
