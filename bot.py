@@ -23,7 +23,9 @@ CRYPTO_TOKEN = os.environ["CRYPTO_TOKEN"]
 ADMINS = [8166720202, 1881900547, 8294681123]
 
 CRYPTO_API = "https://pay.crypt.bot/api/"
-WELCOME_IMAGE = "attached_assets/welcome_1775130238071.png"
+WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "attached_assets", "welcome_1775130238071.png")
+if not os.path.exists(WELCOME_IMAGE):
+    WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "welcome.png")
 
 # ========= БД =========
 conn = sqlite3.connect("bot.db", check_same_thread=False)
