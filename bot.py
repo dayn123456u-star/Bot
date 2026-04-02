@@ -1,3 +1,4 @@
+import asyncio
 import html
 import io
 import logging
@@ -109,21 +110,50 @@ ZIP_KEYWORDS = [
 ]
 
 EXTENSIONS = {
-    "python": "py", "py": "py",
-    "javascript": "js", "js": "js",
+    "python": "py", "py": "py", "python3": "py",
+    "javascript": "js", "js": "js", "node": "js",
     "typescript": "ts", "ts": "ts",
-    "html": "html", "css": "css",
-    "json": "json", "yaml": "yaml", "yml": "yaml",
-    "bash": "sh", "sh": "sh",
-    "sql": "sql", "php": "php",
-    "java": "java", "cpp": "cpp", "c": "c",
-    "rust": "rs", "go": "go",
+    "html": "html", "htm": "html",
+    "css": "css",
+    "json": "json",
+    "yaml": "yaml", "yml": "yaml",
+    "bash": "sh", "sh": "sh", "shell": "sh",
+    "sql": "sql",
+    "php": "php",
+    "java": "java",
+    "cpp": "cpp", "c++": "cpp",
+    "c": "c",
+    "rust": "rs",
+    "go": "go",
+    "lua": "lua",
+    "gdscript": "gd", "gd": "gd",
     "": "txt",
 }
+
+CONTENT_HINTS = [
+    (r"import pygame|pygame\.", "py"),
+    (r"import pygame_gui|import tkinter", "py"),
+    (r"#!/usr/bin/env python|#!/usr/bin/python", "py"),
+    (r"def |class |import |from .+ import", "py"),
+    (r"<html|<!DOCTYPE", "html"),
+    (r"function |const |let |var |=>|document\.", "js"),
+    (r"interface |type |: string|: number", "ts"),
+    (r"SELECT |INSERT |UPDATE |DELETE |CREATE TABLE", "sql"),
+    (r"public class |System\.out\.", "java"),
+    (r"#include <|int main\(", "cpp"),
+    (r"fn main\(\)|use std::", "rs"),
+    (r"package main|func main\(\)", "go"),
+]
 
 def wants_zip(text: str) -> bool:
     t = text.lower()
     return any(kw in t for kw in ZIP_KEYWORDS)
+
+def guess_ext_from_content(code: str) -> str:
+    for pattern, ext in CONTENT_HINTS:
+        if re.search(pattern, code):
+            return ext
+    return "txt"
 
 def extract_code_blocks(text: str) -> list:
     pattern = r"```(\w*)\n?([\s\S]*?)```"
@@ -131,7 +161,10 @@ def extract_code_blocks(text: str) -> list:
     for i, m in enumerate(re.finditer(pattern, text)):
         lang = m.group(1).lower().strip()
         code = m.group(2)
-        ext = EXTENSIONS.get(lang, "txt")
+        if lang in EXTENSIONS:
+            ext = EXTENSIONS[lang]
+        else:
+            ext = guess_ext_from_content(code)
         filename = f"file_{i+1}.{ext}"
         blocks.append((filename, code))
     return blocks
@@ -143,6 +176,26 @@ def build_zip(blocks: list) -> io.BytesIO:
             zf.writestr(filename, code)
     buf.seek(0)
     return buf
+
+def format_for_telegram(text: str) -> str:
+    pattern = r"```(\w*)\n?([\s\S]*?)```"
+    result = []
+    last = 0
+    for m in re.finditer(pattern, text):
+        before = text[last:m.start()]
+        if before.strip():
+            result.append(f"<b>{html.escape(before.strip())}</b>")
+        lang = m.group(1).lower().strip()
+        code = m.group(2)
+        if lang:
+            result.append(f'<pre><code class="language-{html.escape(lang)}">{html.escape(code)}</code></pre>')
+        else:
+            result.append(f"<pre>{html.escape(code)}</pre>")
+        last = m.end()
+    after = text[last:]
+    if after.strip():
+        result.append(f"<b>{html.escape(after.strip())}</b>")
+    return "\n".join(result) if result else f"<b>{html.escape(text)}</b>"
 
 def get_user_model(user_id):
     cursor.execute("SELECT model FROM users WHERE user_id=?", (user_id,))
@@ -487,34 +540,26 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await thinking_msg.delete()
 
-    blocks = extract_code_blocks(ai_reply)
-    if blocks and wants_zip(text):
-        zip_buf = build_zip(blocks)
-        names = ", ".join(f[0] for f in blocks)
-        safe_reply = html.escape(ai_reply)
-        max_len = 4000
-        if len(safe_reply) > max_len:
-            for i in range(0, len(safe_reply), max_len):
-                chunk = safe_reply[i:i+max_len]
-                await update.message.reply_text(f"<b>{chunk}</b>", parse_mode="HTML")
-        else:
-            await update.message.reply_text(f"<b>{safe_reply}</b>", parse_mode="HTML")
-        await update.message.reply_document(
-            document=zip_buf,
-            filename="files.zip",
-            caption=f"<b>🏴‍☠️ Файлы: {html.escape(names)}</b>",
-            parse_mode="HTML",
-            reply_markup=chat_keyboard()
-        )
+    formatted = format_for_telegram(ai_reply)
+    max_len = 4000
+    if len(formatted) > max_len:
+        for i in range(0, len(formatted), max_len):
+            await update.message.reply_text(formatted[i:i+max_len], parse_mode="HTML")
+        await update.message.reply_text("​", reply_markup=chat_keyboard())
     else:
-        safe_reply = html.escape(ai_reply)
-        max_len = 4000
-        if len(safe_reply) > max_len:
-            for i in range(0, len(safe_reply), max_len):
-                chunk = safe_reply[i:i+max_len]
-                await update.message.reply_text(f"<b>{chunk}</b>", parse_mode="HTML", reply_markup=chat_keyboard())
-        else:
-            await update.message.reply_text(f"<b>{safe_reply}</b>", parse_mode="HTML", reply_markup=chat_keyboard())
+        await update.message.reply_text(formatted, parse_mode="HTML", reply_markup=chat_keyboard())
+
+    if wants_zip(text):
+        blocks = extract_code_blocks(ai_reply)
+        if blocks:
+            zip_buf = build_zip(blocks)
+            names = ", ".join(f[0] for f in blocks)
+            await update.message.reply_document(
+                document=zip_buf,
+                filename="files.zip",
+                caption=f"<b>🏴‍☠️ Файлы: {html.escape(names)}</b>",
+                parse_mode="HTML",
+            )
 
 # ========= ГОЛОСОВЫЕ СООБЩЕНИЯ =========
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -612,8 +657,8 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_len = 4000
         if len(safe_reply) > max_len:
             for i in range(0, len(safe_reply), max_len):
-                chunk = safe_reply[i:i+max_len]
-                await update.message.reply_text(f"<b>{chunk}</b>", parse_mode="HTML", reply_markup=chat_keyboard())
+                await update.message.reply_text(f"<b>{safe_reply[i:i+max_len]}</b>", parse_mode="HTML")
+            await update.message.reply_text("​", reply_markup=chat_keyboard())
         else:
             await update.message.reply_text(f"<b>{safe_reply}</b>", parse_mode="HTML", reply_markup=chat_keyboard())
 
@@ -997,18 +1042,23 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         encoded_prompt = urllib.parse.quote(prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={hash(prompt) % 99999}"
 
-        response = requests.get(image_url, timeout=60)
-        if response.status_code != 200:
-            raise ValueError(f"Status {response.status_code}")
+        def fetch_image():
+            r = requests.get(image_url, timeout=90)
+            if r.status_code != 200:
+                raise ValueError(f"Status {r.status_code}")
+            return r.content
+
+        image_bytes = await asyncio.to_thread(fetch_image)
+        response = type("R", (), {"content": image_bytes})()
 
         cursor.execute("UPDATE users SET requests = requests - 1, total_used = total_used + 1 WHERE user_id=?", (user_id,))
         conn.commit()
 
         await thinking_msg.delete()
         await update.message.reply_photo(
-            photo=response.content,
+            photo=image_bytes,
             caption=f"<b>🖤 {html.escape(prompt)}</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
