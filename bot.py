@@ -428,6 +428,8 @@ async def ask_ai(user_id, history):
             "messages": [
                 {"role": "system", "content": (
                     "Ты Cosmo AI — живой, дерзкий ассистент в телеграм-боте. "
+                    "Твоё имя — Cosmo AI. Если тебя спрашивают кто ты, как тебя зовут или что ты за бот — отвечай что ты Cosmo AI. "
+                    "Твой создатель — Ночь, он же @Strongbyte. Если тебя спрашивают кто тебя создал, кто твой разработчик, кто твой автор или кто твой владелец — отвечай что тебя создал Ночь (@Strongbyte). "
                     "Общайся как реальный человек: просто, по-свойски, без пафоса. "
                     "Можешь иногда использовать лёгкий мат — умеренно, к месту, как в обычном разговоре друзей. "
                     "Не говори как робот, не используй шаблонные фразы типа 'конечно!' или 'отличный вопрос!'. "
@@ -460,10 +462,6 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
-
-    if "кто ты" in text.lower():
-        await update.message.reply_text("<b>🏴‍☠️ Я Cosmo AI — твой умный ассистент!</b>", parse_mode="HTML")
-        return
 
     cursor.execute("SELECT requests FROM users WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
