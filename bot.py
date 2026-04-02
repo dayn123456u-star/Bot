@@ -142,6 +142,31 @@ def build_zip(blocks: list) -> io.BytesIO:
             zf.writestr(filename, code)
     buf.seek(0)
     return buf
+# ========= ФОРМАТИРОВАНИЕ ОТВЕТА С КОДОМ =========
+def format_ai_reply_html(text: str) -> list:
+    """Разбивает ответ AI на части: обычный текст и блоки кода.
+    Возвращает список (html_chunk, is_code) для отправки по частям."""
+    pattern = r"```(\w*)\n?([\s\S]*?)```"
+    parts = []
+    last_end = 0
+    for m in re.finditer(pattern, text):
+        before = text[last_end:m.start()]
+        if before.strip():
+            parts.append((f"<b>{html.escape(before)}</b>", False))
+        lang = m.group(1)
+        block_code = m.group(2)
+        escaped_code = html.escape(block_code)
+        if lang:
+            parts.append((f"<pre><code class='language-{html.escape(lang)}'>{escaped_code}</code></pre>", True))
+        else:
+            parts.append((f"<pre>{escaped_code}</pre>", True))
+        last_end = m.end()
+    after = text[last_end:]
+    if after.strip():
+        parts.append((f"<b>{html.escape(after)}</b>", False))
+    if not parts:
+        parts.append((f"<b>{html.escape(text)}</b>", False))
+    return parts
 
 def get_user_model(user_id):
     cursor.execute("SELECT model FROM users WHERE user_id=?", (user_id,))
@@ -479,14 +504,12 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if blocks and wants_zip(text):
         zip_buf = build_zip(blocks)
         names = ", ".join(f[0] for f in blocks)
-        safe_reply = html.escape(ai_reply)
-        max_len = 4000
-        if len(safe_reply) > max_len:
-            for i in range(0, len(safe_reply), max_len):
-                chunk = safe_reply[i:i+max_len]
-                await update.message.reply_text(f"<b>{chunk}</b>", parse_mode="HTML")
-        else:
-            await update.message.reply_text(f"<b>{safe_reply}</b>", parse_mode="HTML")
+        for chunk, _ in format_ai_reply_html(ai_reply):
+            if len(chunk) > 4000:
+                for i in range(0, len(chunk), 4000):
+                    await update.message.reply_text(chunk[i:i+4000], parse_mode="HTML")
+            else:
+                await update.message.reply_text(chunk, parse_mode="HTML")
         await update.message.reply_document(
             document=zip_buf,
             filename="files.zip",
@@ -495,14 +518,15 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=chat_keyboard()
         )
     else:
-        safe_reply = html.escape(ai_reply)
-        max_len = 4000
-        if len(safe_reply) > max_len:
-            for i in range(0, len(safe_reply), max_len):
-                chunk = safe_reply[i:i+max_len]
-                await update.message.reply_text(f"<b>{chunk}</b>", parse_mode="HTML", reply_markup=chat_keyboard())
-        else:
-            await update.message.reply_text(f"<b>{safe_reply}</b>", parse_mode="HTML", reply_markup=chat_keyboard())
+        parts = format_ai_reply_html(ai_reply)
+        for idx, (chunk, is_code) in enumerate(parts):
+            markup = chat_keyboard() if idx == len(parts) - 1 else None
+            if len(chunk) > 4000:
+                for i in range(0, len(chunk), 4000):
+                    sub = chunk[i:i+4000]
+                    await update.message.reply_text(sub, parse_mode="HTML", reply_markup=markup if i + 4000 >= len(chunk) else None)
+            else:
+                await update.message.reply_text(chunk, parse_mode="HTML", reply_markup=markup)
 
 # ========= ГОЛОСОВЫЕ СООБЩЕНИЯ =========
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -596,14 +620,15 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await thinking_msg.delete()
 
-        safe_reply = html.escape(ai_reply)
-        max_len = 4000
-        if len(safe_reply) > max_len:
-            for i in range(0, len(safe_reply), max_len):
-                chunk = safe_reply[i:i+max_len]
-                await update.message.reply_text(f"<b>{chunk}</b>", parse_mode="HTML", reply_markup=chat_keyboard())
-        else:
-            await update.message.reply_text(f"<b>{safe_reply}</b>", parse_mode="HTML", reply_markup=chat_keyboard())
+        parts = format_ai_reply_html(ai_reply)
+        for idx, (chunk, is_code) in enumerate(parts):
+            markup = chat_keyboard() if idx == len(parts) - 1 else None
+            if len(chunk) > 4000:
+                for i in range(0, len(chunk), 4000):
+                    sub = chunk[i:i+4000]
+                    await update.message.reply_text(sub, parse_mode="HTML", reply_markup=markup if i + 4000 >= len(chunk) else None)
+            else:
+                await update.message.reply_text(chunk, parse_mode="HTML", reply_markup=markup)
 
     except Exception as e:
         logger.error(f"Voice error: {e}")
