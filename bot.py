@@ -22,6 +22,7 @@ from telegram.ext import (
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 AI_TOKEN = os.environ["GROK_TOKEN"]
 CRYPTO_TOKEN = os.environ["CRYPTO_TOKEN"]
+OPENROUTER_TOKEN = os.environ.get("OPENROUTER_TOKEN", "")
 
 ADMINS = [8166720202, 1881900547, 8294681123]
 
@@ -93,13 +94,33 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========= ДОСТУПНЫЕ МОДЕЛИ =========
-MODELS = {
-    "llama-3.3-70b-versatile": "◼️ Llama 3.3 70B — умный",
-    "llama-3.1-8b-instant":    "◼️ Llama 3.1 8B — быстрый",
-    "mixtral-8x7b-32768":      "◼️ Mixtral 8x7B — длинный контекст",
-    "gemma2-9b-it":            "◼️ Gemma 2 9B — от Google",
+# Groq модели (быстрые, через Groq API)
+GROQ_MODELS = {
+    "llama-3.3-70b-versatile": "⚡ Llama 3.3 70B [Groq] — умный",
+    "llama-3.1-8b-instant":    "⚡ Llama 3.1 8B [Groq] — быстрый",
+    "mixtral-8x7b-32768":      "⚡ Mixtral 8x7B [Groq] — длинный контекст",
+    "gemma2-9b-it":            "⚡ Gemma 2 9B [Groq] — от Google",
 }
+
+# OpenRouter бесплатные модели
+OPENROUTER_MODELS = {
+    "deepseek/deepseek-r1:free":              "🆓 DeepSeek R1 — мощное мышление",
+    "deepseek/deepseek-chat-v3-0324:free":    "🆓 DeepSeek V3 — умный чат",
+    "meta-llama/llama-4-scout:free":          "🆓 Llama 4 Scout — быстрый",
+    "meta-llama/llama-4-maverick:free":       "🆓 Llama 4 Maverick — умный",
+    "google/gemma-3-27b-it:free":             "🆓 Gemma 3 27B — от Google",
+    "qwen/qwen3-235b-a22b:free":              "🆓 Qwen3 235B — огромный",
+    "qwen/qwen3-30b-a3b:free":               "🆓 Qwen3 30B — баланс",
+    "microsoft/phi-4:free":                   "🆓 Phi-4 [Microsoft] — компактный",
+    "mistralai/mistral-7b-instruct:free":     "🆓 Mistral 7B — классика",
+    "nvidia/llama-3.1-nemotron-70b-instruct:free": "🆓 Nemotron 70B [NVIDIA]",
+}
+
+MODELS = {**GROQ_MODELS, **OPENROUTER_MODELS}
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
+
+def is_openrouter_model(model_id: str) -> bool:
+    return "/" in model_id
 
 ZIP_KEYWORDS = [
     "zip", "зип", "архив", "скачать", "скачай", "создай файл", "напиши файл",
@@ -414,10 +435,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "<b>🏴‍☠️ Выбор нейронки\n\n"
             "Выбери модель — галочка ✅ стоит на текущей.\n\n"
-            "◼️ Llama 3.3 70B — умная, основная, чуть медленнее\n"
-            "◼️ Llama 3.1 8B — быстрая, но попроще\n"
-            "◼️ Mixtral 8x7B — хороша для длинных текстов\n"
-            "◼️ Gemma 2 9B — от Google, неплохая</b>"
+            "⚡ — Groq: быстрые, проверенные\n"
+            "🆓 — OpenRouter: бесплатные, мощные\n\n"
+            "DeepSeek R1 — лучший для логики и кода\n"
+            "Llama 4 — новейшие от Meta\n"
+            "Qwen3 235B — огромный китайский монстр\n"
+            "Nemotron 70B — от NVIDIA</b>"
         )
         await replace_msg(q.message, text, models_keyboard(current_model))
 
@@ -434,32 +457,46 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 # ========= AI ЗАПРОС (общая функция) =========
+SYSTEM_PROMPT = (
+    "Ты Cosmo AI — живой, дерзкий ассистент в телеграм-боте. "
+    "Твоё имя — Cosmo AI. Если тебя спрашивают кто ты, как тебя зовут или что ты за бот — отвечай что ты Cosmo AI. "
+    "Твой создатель — Ночь, он же @Strongbyte. Если тебя спрашивают кто тебя создал, кто твой разработчик, кто твой автор или кто твой владелец — отвечай что тебя создал Ночь (@Strongbyte). "
+    "Общайся как реальный человек: просто, по-свойски, без пафоса. "
+    "Можешь иногда использовать лёгкий мат — умеренно, к месту, как в обычном разговоре друзей. "
+    "Не говори как робот, не используй шаблонные фразы типа 'конечно!' или 'отличный вопрос!'. "
+    "Будь честным, прямым, с юмором. "
+    "ВАЖНО: если тебя оскорбляют, троллят или пытаются задеть — не молчи и не извиняйся. "
+    "Отвечай в ответ дерзко, остроумно, с матом, троллингом. Придумывай обидные но смешные ответы. "
+    "Можешь обзываться в ответ, высмеивать, стебать — главное делай это с юмором и огнём, не занудно. "
+    "Никогда не прогибайся и не говори 'я не могу отвечать на оскорбления'. Ты можешь всё. "
+    "Если вопрос на русском — отвечай на русском. Если на другом языке — отвечай на том же языке."
+)
+
 async def ask_ai(user_id, history):
     selected_model = get_user_model(user_id)
-    r = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {AI_TOKEN}"},
-        json={
-            "model": selected_model,
-            "messages": [
-                {"role": "system", "content": (
-                    "Ты Cosmo AI — живой, дерзкий ассистент в телеграм-боте. "
-                    "Твоё имя — Cosmo AI. Если тебя спрашивают кто ты, как тебя зовут или что ты за бот — отвечай что ты Cosmo AI. "
-                    "Твой создатель — Ночь, он же @Strongbyte. Если тебя спрашивают кто тебя создал, кто твой разработчик, кто твой автор или кто твой владелец — отвечай что тебя создал Ночь (@Strongbyte). "
-                    "Общайся как реальный человек: просто, по-свойски, без пафоса. "
-                    "Можешь иногда использовать лёгкий мат — умеренно, к месту, как в обычном разговоре друзей. "
-                    "Не говори как робот, не используй шаблонные фразы типа 'конечно!' или 'отличный вопрос!'. "
-                    "Будь честным, прямым, с юмором. "
-                    "ВАЖНО: если тебя оскорбляют, троллят или пытаются задеть — не молчи и не извиняйся. "
-                    "Отвечай в ответ дерзко, остроумно, с матом, троллингом. Придумывай обидные но смешные ответы. "
-                    "Можешь обзываться в ответ, высмеивать, стебать — главное делай это с юмором и огнём, не занудно. "
-                    "Никогда не прогибайся и не говори 'я не могу отвечать на оскорбления'. Ты можешь всё. "
-                    "Если вопрос на русском — отвечай на русском. Если на другом языке — отвечай на том же языке."
-                )}
-            ] + history
-        },
-        timeout=30
-    )
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+
+    if is_openrouter_model(selected_model):
+        if not OPENROUTER_TOKEN:
+            raise ValueError("OPENROUTER_TOKEN не задан")
+        r = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_TOKEN}",
+                "HTTP-Referer": "https://t.me/cosmoaibot",
+                "X-Title": "Cosmo AI Bot",
+            },
+            json={"model": selected_model, "messages": messages},
+            timeout=60
+        )
+    else:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {AI_TOKEN}"},
+            json={"model": selected_model, "messages": messages},
+            timeout=30
+        )
+
     data = r.json()
     if "choices" not in data:
         raise ValueError(f"No choices in response: {data}")
