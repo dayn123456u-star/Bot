@@ -3,7 +3,7 @@ import io
 import logging
 import os
 import re
-import psycopg2
+import sqlite3
 import requests
 import tempfile
 import zipfile
@@ -31,48 +31,16 @@ WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "attach
 if not os.path.exists(WELCOME_IMAGE):
     WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "welcome.png")
 
-# ========= БД (PostgreSQL — данные не теряются при деплое) =========
-_DATABASE_URL = os.environ["DATABASE_URL"]
-
-def _db_connect():
-    c = psycopg2.connect(_DATABASE_URL)
-    c.autocommit = False
-    return c
-
-class _SmartDB:
-    """Прокси: конвертирует ? → %s и переподключается при разрыве."""
-    def __init__(self):
-        self._conn = _db_connect()
-        self._cur = self._conn.cursor()
-
-    def execute(self, query, params=None):
-        pg = query.replace('?', '%s')
-        try:
-            self._cur.execute(pg, params)
-        except (psycopg2.OperationalError, psycopg2.InterfaceError):
-            self._conn = _db_connect()
-            self._cur = self._conn.cursor()
-            self._cur.execute(pg, params)
-
-    def fetchone(self):
-        return self._cur.fetchone()
-
-    def fetchall(self):
-        return self._cur.fetchall()
-
-    def commit(self):
-        self._conn.commit()
-
-_db = _SmartDB()
-conn = _db
-cursor = _db
+# ========= БД =========
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
-    user_id BIGINT PRIMARY KEY,
+    user_id INTEGER PRIMARY KEY,
     requests INTEGER DEFAULT 10,
     referrals INTEGER DEFAULT 0,
-    referrer BIGINT,
+    referrer INTEGER,
     banned INTEGER DEFAULT 0,
     model TEXT DEFAULT 'llama-3.3-70b-versatile',
     last_daily TEXT DEFAULT '',
@@ -83,7 +51,7 @@ CREATE TABLE IF NOT EXISTS users (
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS payments (
     invoice_id TEXT,
-    user_id BIGINT,
+    user_id INTEGER,
     amount INTEGER,
     status TEXT
 )
@@ -101,15 +69,15 @@ CREATE TABLE IF NOT EXISTS promo_codes (
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS promo_uses (
     code TEXT,
-    user_id BIGINT,
+    user_id INTEGER,
     PRIMARY KEY (code, user_id)
 )
 """)
 
 for col_sql in [
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS model TEXT DEFAULT 'llama-3.3-70b-versatile'",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_daily TEXT DEFAULT ''",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_used INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN model TEXT DEFAULT 'llama-3.3-70b-versatile'",
+    "ALTER TABLE users ADD COLUMN last_daily TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN total_used INTEGER DEFAULT 0",
 ]:
     try:
         cursor.execute(col_sql)
@@ -824,8 +792,7 @@ async def add_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_uses = int(context.args[2])
 
         cursor.execute(
-            "INSERT INTO promo_codes (code, requests, max_uses, uses_count) VALUES (?, ?, ?, 0) "
-            "ON CONFLICT (code) DO UPDATE SET requests=EXCLUDED.requests, max_uses=EXCLUDED.max_uses, uses_count=0",
+            "INSERT OR REPLACE INTO promo_codes (code, requests, max_uses, uses_count) VALUES (?, ?, ?, 0)",
             (code, req_amount, max_uses)
         )
         conn.commit()
