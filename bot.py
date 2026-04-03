@@ -226,13 +226,43 @@ def models_keyboard(current_model):
     rows.append([InlineKeyboardButton("🏴‍☠️ В меню", callback_data="menu")])
     return InlineKeyboardMarkup(rows)
 
-# ========= ОТПРАВКА С ФОТО =========
+# ========= ОТПРАВКА / ЗАМЕНА СООБЩЕНИЙ =========
 async def send_photo_msg(target, text, markup=None):
+    """Отправляет новое сообщение с фото (только для /start по команде)."""
     try:
         with open(WELCOME_IMAGE, "rb") as photo:
             await target.reply_photo(photo=photo, caption=text, parse_mode="HTML", reply_markup=markup)
     except (FileNotFoundError, OSError):
         await target.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+async def replace_msg(message, text, markup=None):
+    """Редактирует существующее сообщение вместо отправки нового."""
+    try:
+        await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        try:
+            await message.edit_caption(caption=text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            await message.chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+
+async def replace_msg_photo(message, text, markup=None):
+    """Редактирует сообщение с фото или пересоздаёт его."""
+    try:
+        await message.edit_caption(caption=text, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        try:
+            with open(WELCOME_IMAGE, "rb") as photo:
+                await message.chat.send_photo(photo=photo, caption=text, parse_mode="HTML", reply_markup=markup)
+        except (FileNotFoundError, OSError):
+            await message.chat.send_message(text, parse_mode="HTML", reply_markup=markup)
 
 # ========= СТАРТ =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,13 +310,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if update.message:
-        target = update.message
+        await send_photo_msg(update.message, text, menu())
     elif update.callback_query:
-        target = update.callback_query.message
-    else:
-        return
-
-    await send_photo_msg(target, text, menu())
+        await replace_msg_photo(update.callback_query.message, text, menu())
 
 # ========= ADMIN ПРОВЕРКА =========
 def is_admin(user_id):
@@ -304,27 +330,24 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "chat":
         context.user_data["chat"] = True
         context.user_data["history"] = []
-        await q.message.reply_text(
+        await replace_msg(q.message,
             "<b>🏴‍☠️ Жду запроса!\n\nНовый диалог начат — пиши что хочешь.</b>",
-            parse_mode="HTML",
-            reply_markup=chat_keyboard()
+            chat_keyboard()
         )
 
     elif q.data == "voice":
         context.user_data["voice_only"] = True
         context.user_data["chat"] = False
-        await q.message.reply_text(
+        await replace_msg(q.message,
             "<b>🏴‍☠️ Режим расшифровки голоса!\n\nОтправь голосовое — переведу в текст.</b>",
-            parse_mode="HTML",
-            reply_markup=back()
+            back()
         )
 
     elif q.data == "reset_chat":
         context.user_data["history"] = []
-        await q.message.reply_text(
+        await replace_msg(q.message,
             "<b>🏴‍☠️ Диалог сброшен. Начинаем заново!</b>",
-            parse_mode="HTML",
-            reply_markup=chat_keyboard()
+            chat_keyboard()
         )
 
     elif q.data == "info":
@@ -336,21 +359,20 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "так как мне тупо лень делать такую функцию, мне главное, чтобы работало, и всё, ваши запросы не будут нигде использоваться и распространяться, "
             "вы полностью анонимны.!</b>"
         )
-        await send_photo_msg(q.message, text, back())
+        await replace_msg_photo(q.message, text, back())
 
     elif q.data == "support":
         text = "<b>🏴‍☠️ Поддержка\n\nПо всем вопросам: @strongbyte</b>"
-        await send_photo_msg(q.message, text, back())
+        await replace_msg_photo(q.message, text, back())
 
     elif q.data == "buy":
-        await q.message.reply_text(
+        await replace_msg(q.message,
             "<b>🏴‍☠️ Купить запросы\n\n"
             "🏴‍☠️ 100 запросов — 1 USDT\n"
             "🏴‍☠️ 300 запросов — 2.5 USDT\n"
             "🏴‍☠️ 1000 запросов — 7 USDT\n\n"
             "Напиши /buy_100, /buy_300 или /buy_1000 для оплаты</b>",
-            parse_mode="HTML",
-            reply_markup=back()
+            back()
         )
 
     elif q.data == "profile":
@@ -371,7 +393,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🏴‍☠️ Приглашён: {'Да' if referrer else 'Нет'}\n"
             f"🏴‍☠️ Нейронка: {model_label}</b>"
         )
-        await q.message.reply_text(text, parse_mode="HTML", reply_markup=back())
+        await replace_msg(q.message, text, back())
 
     elif q.data == "referrals":
         cursor.execute("SELECT referrals, referrer FROM users WHERE user_id=?", (user_id,))
@@ -389,7 +411,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🏴‍☠️ Каждые 10 рефералов: +50 бонус\n\n"
             f"🏴‍☠️ Приглашён кем-то: {'Да' if referrer else 'Нет'}</b>"
         )
-        await q.message.reply_text(text, parse_mode="HTML", reply_markup=back())
+        await replace_msg(q.message, text, back())
 
     elif q.data == "models":
         current_model = get_user_model(user_id)
@@ -401,8 +423,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "◼️ Mixtral 8x7B — хороша для длинных текстов\n"
             "◼️ Gemma 2 9B — от Google, неплохая</b>"
         )
-        await q.message.reply_text(text, parse_mode="HTML", reply_markup=models_keyboard(current_model))
-
+        await replace_msg(q.message, text, models_keyboard(current_model))
 
     elif q.data.startswith("setmodel_"):
         model_id = q.data.replace("setmodel_", "")
@@ -411,10 +432,9 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
             context.user_data["history"] = []
             label = MODELS[model_id]
-            await q.message.reply_text(
+            await replace_msg(q.message,
                 f"<b>🏴‍☠️ Нейронка изменена на {label}\n\nИстория диалога сброшена.</b>",
-                parse_mode="HTML",
-                reply_markup=models_keyboard(model_id)
+                models_keyboard(model_id)
             )
 
 # ========= AI ЗАПРОС (общая функция) =========
