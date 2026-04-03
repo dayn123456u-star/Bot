@@ -96,24 +96,24 @@ logger = logging.getLogger(__name__)
 # ========= ДОСТУПНЫЕ МОДЕЛИ =========
 # Groq модели (быстрые, через Groq API)
 GROQ_MODELS = {
-    "llama-3.3-70b-versatile": "⚡ Llama 3.3 70B [Groq] — умный",
-    "llama-3.1-8b-instant":    "⚡ Llama 3.1 8B [Groq] — быстрый",
-    "mixtral-8x7b-32768":      "⚡ Mixtral 8x7B [Groq] — длинный контекст",
-    "gemma2-9b-it":            "⚡ Gemma 2 9B [Groq] — от Google",
+    "llama-3.3-70b-versatile": "🏴 Llama 3.3 70B [Groq] — умный",
+    "llama-3.1-8b-instant":    "🏴 Llama 3.1 8B [Groq] — быстрый",
+    "mixtral-8x7b-32768":      "🏴 Mixtral 8x7B [Groq] — длинный контекст",
+    "gemma2-9b-it":            "🏴 Gemma 2 9B [Groq] — от Google",
 }
 
 # OpenRouter бесплатные модели
 OPENROUTER_MODELS = {
-    "deepseek/deepseek-r1:free":              "🆓 DeepSeek R1 — мощное мышление",
-    "deepseek/deepseek-chat-v3-0324:free":    "🆓 DeepSeek V3 — умный чат",
-    "meta-llama/llama-4-scout:free":          "🆓 Llama 4 Scout — быстрый",
-    "meta-llama/llama-4-maverick:free":       "🆓 Llama 4 Maverick — умный",
-    "google/gemma-3-27b-it:free":             "🆓 Gemma 3 27B — от Google",
-    "qwen/qwen3-235b-a22b:free":              "🆓 Qwen3 235B — огромный",
-    "qwen/qwen3-30b-a3b:free":               "🆓 Qwen3 30B — баланс",
-    "microsoft/phi-4:free":                   "🆓 Phi-4 [Microsoft] — компактный",
-    "mistralai/mistral-7b-instruct:free":     "🆓 Mistral 7B — классика",
-    "nvidia/llama-3.1-nemotron-70b-instruct:free": "🆓 Nemotron 70B [NVIDIA]",
+    "deepseek/deepseek-r1:free":              "🏴 DeepSeek R1 — мощное мышление",
+    "deepseek/deepseek-chat-v3-0324:free":    "🏴 DeepSeek V3 — умный чат",
+    "meta-llama/llama-4-scout:free":          "🏴 Llama 4 Scout — быстрый",
+    "meta-llama/llama-4-maverick:free":       "🏴 Llama 4 Maverick — умный",
+    "google/gemma-3-27b-it:free":             "🏴 Gemma 3 27B — от Google",
+    "qwen/qwen3-235b-a22b:free":              "🏴 Qwen3 235B — огромный",
+    "qwen/qwen3-30b-a3b:free":               "🏴 Qwen3 30B — баланс",
+    "microsoft/phi-4:free":                   "🏴 Phi-4 [Microsoft] — компактный",
+    "mistralai/mistral-7b-instruct:free":     "🏴 Mistral 7B — классика",
+    "nvidia/llama-3.1-nemotron-70b-instruct:free": "🏴 Nemotron 70B [NVIDIA]",
 }
 
 MODELS = {**GROQ_MODELS, **OPENROUTER_MODELS}
