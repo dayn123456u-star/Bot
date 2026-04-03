@@ -189,22 +189,18 @@ def check_daily_bonus(user_id):
 # ========= КНОПКИ =========
 def menu():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏴 Начать диалог", callback_data="chat")],
+        [InlineKeyboardButton("🏴 Голосовые сообщения", callback_data="voice")],
         [
-            InlineKeyboardButton("▪️ Начать диалог", callback_data="chat"),
-            InlineKeyboardButton("▪️ Голосовые", callback_data="voice"),
+            InlineKeyboardButton("🏴 Профиль", callback_data="profile"),
+            InlineKeyboardButton("🏴 Рефералы", callback_data="referrals"),
         ],
         [
-            InlineKeyboardButton("▪️ Мой профиль", callback_data="profile"),
-            InlineKeyboardButton("▪️ Рефералы", callback_data="referrals"),
+            InlineKeyboardButton("🏴 Информация", callback_data="info"),
+            InlineKeyboardButton("🏴 Поддержка", callback_data="support"),
         ],
-        [
-            InlineKeyboardButton("▪️ Информация", callback_data="info"),
-            InlineKeyboardButton("▪️ Поддержка", callback_data="support"),
-        ],
-        [
-            InlineKeyboardButton("▪️ Купить лимиты", callback_data="buy"),
-            InlineKeyboardButton("▪️ Выбор нейронки", callback_data="models"),
-        ],
+        [InlineKeyboardButton("🏴 Купить запросы", callback_data="buy")],
+        [InlineKeyboardButton("🏴 Выбор нейронки", callback_data="models")],
     ])
 
 def back():
