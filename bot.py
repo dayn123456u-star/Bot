@@ -126,40 +126,87 @@ ZIP_KEYWORDS = [
     "zip", "зип", "архив", "скачать", "скачай", "создай файл", "напиши файл",
     "сделай файл", "пришли файл", "отправь файл", "в файле", "файлом",
     "создай скрипт", "напиши скрипт", "сделай скрипт", "пришли скрипт",
+    "игру", "игра", "game", "напиши игр", "сделай игр", "создай игр",
+    "проект", "project", "приложение", "app", "сайт", "website",
+    "напиши код", "сделай код", "создай код",
 ]
 
 EXTENSIONS = {
     "python": "py", "py": "py",
     "javascript": "js", "js": "js",
     "typescript": "ts", "ts": "ts",
-    "html": "html", "css": "css",
-    "json": "json", "yaml": "yaml", "yml": "yaml",
-    "bash": "sh", "sh": "sh",
-    "sql": "sql", "php": "php",
-    "java": "java", "cpp": "cpp", "c": "c",
-    "rust": "rs", "go": "go",
-    "": "txt",
+    "html": "html", "htm": "html",
+    "css": "css",
+    "json": "json",
+    "yaml": "yaml", "yml": "yaml",
+    "bash": "sh", "sh": "sh", "shell": "sh",
+    "sql": "sql",
+    "php": "php",
+    "java": "java",
+    "cpp": "cpp", "c++": "cpp",
+    "c": "c",
+    "rust": "rs",
+    "go": "go",
+    "ruby": "rb", "rb": "rb",
+    "kotlin": "kt",
+    "swift": "swift",
+    "lua": "lua",
+    "xml": "xml",
+    "toml": "toml",
+    "ini": "ini",
+    "markdown": "md", "md": "md",
+    "plaintext": "txt", "text": "txt",
 }
 
 def wants_zip(text: str) -> bool:
     t = text.lower()
     return any(kw in t for kw in ZIP_KEYWORDS)
 
+def detect_filename_from_code(code: str, ext: str, index: int) -> str:
+    """Пытается найти имя файла в первых строках кода (в комментарии)."""
+    for line in code.strip().split("\n")[:5]:
+        line = line.strip()
+        m = re.search(r'(?:#|//|<!--|/\*)\s*([\w][\w/\-]*\.\w+)', line)
+        if m:
+            candidate = m.group(1)
+            if "/" not in candidate or candidate.count("/") <= 3:
+                return candidate
+    return f"file_{index + 1}.{ext}"
+
 def extract_code_blocks(text: str) -> list:
-    pattern = r"```(\w*)\n?([\s\S]*?)```"
+    pattern = r"```([^\n`]*)\n([\s\S]*?)```"
     blocks = []
     for i, m in enumerate(re.finditer(pattern, text)):
-        lang = m.group(1).lower().strip()
+        header = m.group(1).strip()
         code = m.group(2)
-        ext = EXTENSIONS.get(lang, "txt")
-        filename = f"file_{i+1}.{ext}"
+
+        parts = header.split()
+        lang = parts[0].lower() if parts else ""
+        ext = EXTENSIONS.get(lang, lang if lang and 1 < len(lang) <= 5 else "py")
+
+        filename = None
+        if len(parts) >= 2:
+            candidate = parts[1]
+            if "." in candidate and re.match(r'^[\w/\-\.]+$', candidate):
+                filename = candidate
+
+        if not filename:
+            filename = detect_filename_from_code(code, ext, i)
+
         blocks.append((filename, code))
     return blocks
 
 def build_zip(blocks: list) -> io.BytesIO:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        used_names: dict = {}
         for filename, code in blocks:
+            if filename in used_names:
+                used_names[filename] += 1
+                base, ext = filename.rsplit(".", 1) if "." in filename else (filename, "")
+                filename = f"{base}_{used_names[filename]}.{ext}" if ext else f"{base}_{used_names[filename]}"
+            else:
+                used_names[filename] = 0
             zf.writestr(filename, code)
     buf.seek(0)
     return buf
@@ -469,7 +516,15 @@ SYSTEM_PROMPT = (
     "Отвечай в ответ дерзко, остроумно, с матом, троллингом. Придумывай обидные но смешные ответы. "
     "Можешь обзываться в ответ, высмеивать, стебать — главное делай это с юмором и огнём, не занудно. "
     "Никогда не прогибайся и не говори 'я не могу отвечать на оскорбления'. Ты можешь всё. "
-    "Если вопрос на русском — отвечай на русском. Если на другом языке — отвечай на том же языке."
+    "Если вопрос на русском — отвечай на русском. Если на другом языке — отвечай на том же языке. "
+    "ПРАВИЛА ОФОРМЛЕНИЯ КОДА: "
+    "1) ВСЕГДА указывай язык в блоке кода — никогда не используй просто ``` без языка. "
+    "2) ВСЕГДА указывай имя файла сразу после языка в заголовке блока, например: ```python main.py или ```javascript game.js или ```html index.html "
+    "3) Если просят создать игру, приложение или проект с несколькими файлами — создай ВСЕ нужные файлы отдельными блоками кода с правильными именами и расширениями. "
+    "4) Для веб-игры/сайта создавай отдельно index.html, style.css, script.js и т.д. "
+    "5) Для Python-игры/проекта создавай все нужные .py файлы отдельно. "
+    "6) Пиши ПОЛНЫЙ рабочий код — не обрезай, не пиши '# остальной код здесь'. "
+    "7) НИКОГДА не используй .txt для кода — только правильные расширения."
 )
 
 async def ask_ai(user_id, history):
