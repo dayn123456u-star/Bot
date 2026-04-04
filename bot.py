@@ -207,18 +207,108 @@ def extract_code_blocks(text: str) -> list:
         blocks.append((filename, code))
     return blocks
 
+def detect_project_type(blocks: list) -> str:
+    """Определяет тип проекта по расширениям файлов."""
+    exts = set()
+    names = set()
+    for fname, _ in blocks:
+        if "." in fname:
+            exts.add(fname.rsplit(".", 1)[1].lower())
+            names.add(fname.lower().split("/")[-1])
+    if "gd" in exts or "tscn" in exts or "tres" in exts or "project.godot" in names:
+        return "godot"
+    if "rpy" in exts:
+        return "renpy"
+    if "cs" in exts:
+        return "unity"
+    if "lua" in exts:
+        return "love2d"
+    if "html" in exts or "htm" in exts:
+        return "html5"
+    if exts and exts <= {"py"}:
+        return "pygame"
+    return "generic"
+
+def assign_folder(filename: str, project_type: str) -> str:
+    """Если файл уже имеет путь с папкой — не трогаем. Иначе кладём в нужную папку."""
+    if "/" in filename:
+        return filename   # AI уже указал путь — сохраняем
+
+    name = filename.lower()
+    ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
+
+    if project_type == "godot":
+        if name == "project.godot":           return filename
+        if ext == "gd":                       return f"scripts/{filename}"
+        if ext == "tscn":                     return f"scenes/{filename}"
+        if ext in ("tres", "import"):         return f"resources/{filename}"
+        if ext in ("png", "jpg", "jpeg", "svg", "webp"): return f"assets/textures/{filename}"
+        if ext in ("ogg", "wav", "mp3"):      return f"assets/sounds/{filename}"
+        if ext in ("md", "txt"):              return filename
+        return f"scripts/{filename}"
+
+    elif project_type == "renpy":
+        if ext == "rpy":                      return f"game/{filename}"
+        if ext in ("png", "jpg", "jpeg"):     return f"game/images/{filename}"
+        if ext in ("ogg", "mp3", "wav"):      return f"game/audio/{filename}"
+        if ext in ("md", "txt"):              return filename
+        return f"game/{filename}"
+
+    elif project_type == "unity":
+        if ext == "cs":                       return f"Assets/Scripts/{filename}"
+        if ext in ("png", "jpg", "jpeg"):     return f"Assets/Textures/{filename}"
+        if ext in ("ogg", "wav", "mp3"):      return f"Assets/Audio/{filename}"
+        if ext == "json":                     return f"Assets/Data/{filename}"
+        if ext in ("md", "txt"):              return filename
+        return f"Assets/Scripts/{filename}"
+
+    elif project_type == "love2d":
+        if ext == "lua":                      return filename  # main.lua, conf.lua — в корень
+        if ext in ("png", "jpg", "jpeg"):     return f"assets/images/{filename}"
+        if ext in ("ogg", "wav", "mp3"):      return f"assets/sounds/{filename}"
+        return filename
+
+    elif project_type == "html5":
+        if ext == "html":                     return filename
+        if ext == "css":                      return f"css/{filename}"
+        if ext == "js":                       return f"js/{filename}"
+        if ext in ("png", "jpg", "jpeg", "svg", "gif"): return f"assets/{filename}"
+        if ext in ("ogg", "wav", "mp3"):      return f"assets/sounds/{filename}"
+        return filename
+
+    elif project_type == "pygame":
+        if ext == "py":
+            if name in ("main.py", "game.py", "run.py"): return filename
+            return f"src/{filename}"
+        if ext == "json":                     return f"data/{filename}"
+        if ext in ("png", "jpg", "jpeg"):     return f"assets/images/{filename}"
+        if ext in ("ogg", "wav", "mp3"):      return f"assets/sounds/{filename}"
+        if ext in ("md", "txt"):              return filename
+        return f"assets/{filename}"
+
+    else:  # generic
+        if ext in ("py",):                    return filename
+        if ext in ("js", "ts"):               return f"src/{filename}"
+        if ext == "css":                      return f"css/{filename}"
+        if ext == "html":                     return filename
+        if ext == "json":                     return filename
+        if ext in ("png", "jpg", "jpeg", "svg"): return f"assets/{filename}"
+        return filename
+
 def build_zip(blocks: list) -> io.BytesIO:
+    project_type = detect_project_type(blocks)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         used_names: dict = {}
         for filename, code in blocks:
+            filename = assign_folder(filename, project_type)
             if filename in used_names:
                 used_names[filename] += 1
                 base, ext = filename.rsplit(".", 1) if "." in filename else (filename, "")
                 filename = f"{base}_{used_names[filename]}.{ext}" if ext else f"{base}_{used_names[filename]}"
             else:
                 used_names[filename] = 0
-            zf.writestr(filename, code)
+            zf.writestr(filename, code.encode("utf-8"))
     buf.seek(0)
     return buf
 # ========= ФОРМАТИРОВАНИЕ ОТВЕТА С КОДОМ =========
