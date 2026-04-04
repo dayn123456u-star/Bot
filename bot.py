@@ -3,7 +3,7 @@ import io
 import logging
 import os
 import re
-import sqlite3
+import psycopg2
 import requests
 import tempfile
 import zipfile
@@ -31,16 +31,48 @@ WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "attach
 if not os.path.exists(WELCOME_IMAGE):
     WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "welcome.png")
 
-# ========= БД =========
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
+# ========= БД (PostgreSQL — данные не теряются при деплое) =========
+_DATABASE_URL = os.environ["DATABASE_URL"]
+
+def _db_connect():
+    c = psycopg2.connect(_DATABASE_URL)
+    c.autocommit = False
+    return c
+
+class _SmartDB:
+    """Прокси: конвертирует ? → %s и переподключается при разрыве."""
+    def __init__(self):
+        self._conn = _db_connect()
+        self._cur = self._conn.cursor()
+
+    def execute(self, query, params=None):
+        pg = query.replace('?', '%s')
+        try:
+            self._cur.execute(pg, params)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            self._conn = _db_connect()
+            self._cur = self._conn.cursor()
+            self._cur.execute(pg, params)
+
+    def fetchone(self):
+        return self._cur.fetchone()
+
+    def fetchall(self):
+        return self._cur.fetchall()
+
+    def commit(self):
+        self._conn.commit()
+
+_db = _SmartDB()
+conn = _db
+cursor = _db
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
+    user_id BIGINT PRIMARY KEY,
     requests INTEGER DEFAULT 10,
     referrals INTEGER DEFAULT 0,
-    referrer INTEGER,
+    referrer BIGINT,
     banned INTEGER DEFAULT 0,
     model TEXT DEFAULT 'llama-3.3-70b-versatile',
     last_daily TEXT DEFAULT '',
@@ -51,7 +83,7 @@ CREATE TABLE IF NOT EXISTS users (
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS payments (
     invoice_id TEXT,
-    user_id INTEGER,
+    user_id BIGINT,
     amount INTEGER,
     status TEXT
 )
@@ -69,15 +101,15 @@ CREATE TABLE IF NOT EXISTS promo_codes (
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS promo_uses (
     code TEXT,
-    user_id INTEGER,
+    user_id BIGINT,
     PRIMARY KEY (code, user_id)
 )
 """)
 
 for col_sql in [
-    "ALTER TABLE users ADD COLUMN model TEXT DEFAULT 'llama-3.3-70b-versatile'",
-    "ALTER TABLE users ADD COLUMN last_daily TEXT DEFAULT ''",
-    "ALTER TABLE users ADD COLUMN total_used INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS model TEXT DEFAULT 'llama-3.3-70b-versatile'",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_daily TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_used INTEGER DEFAULT 0",
 ]:
     try:
         cursor.execute(col_sql)
@@ -129,9 +161,13 @@ ZIP_KEYWORDS = [
     "игру", "игра", "game", "напиши игр", "сделай игр", "создай игр",
     "проект", "project", "приложение", "app", "сайт", "website",
     "напиши код", "сделай код", "создай код",
+    "godot", "ren'py", "renpy", "unity", "pygame", "love2d", "love ",
+    "движок", "визуальная новелла", "visual novel", "платформер", "platformer",
+    "шутер", "shooter", "rpg", "рпг", "аркада", "arcade",
 ]
 
 EXTENSIONS = {
+    # Веб
     "python": "py", "py": "py",
     "javascript": "js", "js": "js",
     "typescript": "ts", "ts": "ts",
@@ -156,6 +192,22 @@ EXTENSIONS = {
     "ini": "ini",
     "markdown": "md", "md": "md",
     "plaintext": "txt", "text": "txt",
+    "csharp": "cs", "cs": "cs", "c#": "cs",
+    # Godot
+    "gdscript": "gd", "gd": "gd",
+    "godot": "godot",
+    "tscn": "tscn",
+    "tres": "tres",
+    "import": "import",
+    # Ren'Py
+    "renpy": "rpy", "rpy": "rpy",
+    # Love2D
+    "love": "lua",
+    # Конфиги и прочее
+    "cfg": "cfg",
+    "properties": "properties",
+    "gradle": "gradle",
+    "makefile": "Makefile",
 }
 
 def wants_zip(text: str) -> bool:
@@ -517,14 +569,43 @@ SYSTEM_PROMPT = (
     "Можешь обзываться в ответ, высмеивать, стебать — главное делай это с юмором и огнём, не занудно. "
     "Никогда не прогибайся и не говори 'я не могу отвечать на оскорбления'. Ты можешь всё. "
     "Если вопрос на русском — отвечай на русском. Если на другом языке — отвечай на том же языке. "
-    "ПРАВИЛА ОФОРМЛЕНИЯ КОДА: "
-    "1) ВСЕГДА указывай язык в блоке кода — никогда не используй просто ``` без языка. "
-    "2) ВСЕГДА указывай имя файла сразу после языка в заголовке блока, например: ```python main.py или ```javascript game.js или ```html index.html "
-    "3) Если просят создать игру, приложение или проект с несколькими файлами — создай ВСЕ нужные файлы отдельными блоками кода с правильными именами и расширениями. "
-    "4) Для веб-игры/сайта создавай отдельно index.html, style.css, script.js и т.д. "
-    "5) Для Python-игры/проекта создавай все нужные .py файлы отдельно. "
-    "6) Пиши ПОЛНЫЙ рабочий код — не обрезай, не пиши '# остальной код здесь'. "
-    "7) НИКОГДА не используй .txt для кода — только правильные расширения."
+    "ПРАВИЛА ОФОРМЛЕНИЯ КОДА — ЧИТАЙ ВНИМАТЕЛЬНО: "
+    "1) ВСЕГДА указывай язык и имя файла в заголовке блока: ```gdscript Player.gd или ```python main.py или ```rpy script.rpy "
+    "2) Пиши ПОЛНЫЙ рабочий код — никогда не обрезай, не пиши '# продолжение здесь' или '...'. "
+    "3) НИКОГДА не используй .txt — только правильные расширения. "
+    "4) Для проектов с несколькими файлами — создавай ВСЕ файлы отдельными блоками с путями (папка/файл.ext). "
+    ""
+    "GODOT ENGINE: "
+    "Структура проекта: project.godot (конфиг), scenes/ (файлы .tscn), scripts/ (файлы .gd). "
+    "Создавай: project.godot, основную сцену Main.tscn, все .gd скрипты. "
+    "Пример заголовков: ```gdscript scripts/Player.gd, ```tscn scenes/Main.tscn, ```ini project.godot "
+    "Файл .tscn — текстовый формат Godot для сцен. project.godot — ini-формат. "
+    ""
+    "REN'PY: "
+    "Структура: game/script.rpy (основной сценарий), game/options.rpy (настройки), game/gui.rpy (интерфейс). "
+    "Пример заголовков: ```renpy game/script.rpy, ```renpy game/options.rpy "
+    "Синтаксис Ren'Py: label start:, menu:, scene, show, play music, $ переменная = значение. "
+    "Пиши полный разветвлённый сценарий с меню выборов, несколькими концовками. "
+    ""
+    "UNITY: "
+    "Создавай C# скрипты в папке Assets/Scripts/. "
+    "Пример заголовков: ```csharp Assets/Scripts/PlayerController.cs "
+    "Пиши все нужные скрипты: PlayerController, GameManager, EnemyAI и т.д. "
+    "Добавляй README.md с инструкцией как импортировать в Unity. "
+    ""
+    "PYGAME (Python): "
+    "Один или несколько .py файлов. Главный файл: main.py или game.py. "
+    "Создавай полную игру с game loop, спрайтами, коллизиями, счётом. "
+    ""
+    "LOVE2D (Lua): "
+    "Файлы: main.lua (обязательно), conf.lua (настройки). "
+    "Пример: ```lua main.lua, ```lua conf.lua "
+    ""
+    "HTML5 игры: "
+    "Файлы: index.html, style.css, game.js. Используй Canvas API или Phaser.js. "
+    "Всё должно работать открытием index.html в браузере без сервера. "
+    ""
+    "ОБЩЕЕ ПРАВИЛО: всегда создавай ПОЛНЫЙ готовый проект который можно сразу запустить."
 )
 
 async def ask_ai(user_id, history):
@@ -792,7 +873,8 @@ async def add_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_uses = int(context.args[2])
 
         cursor.execute(
-            "INSERT OR REPLACE INTO promo_codes (code, requests, max_uses, uses_count) VALUES (?, ?, ?, 0)",
+            "INSERT INTO promo_codes (code, requests, max_uses, uses_count) VALUES (?, ?, ?, 0) "
+            "ON CONFLICT (code) DO UPDATE SET requests=EXCLUDED.requests, max_uses=EXCLUDED.max_uses, uses_count=0",
             (code, req_amount, max_uses)
         )
         conn.commit()
