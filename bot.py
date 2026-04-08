@@ -4,6 +4,8 @@ import logging
 import os
 import re
 import sqlite3
+import uuid
+import json
 import requests
 import tempfile
 import zipfile
@@ -23,6 +25,7 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 AI_TOKEN = os.environ["GROK_TOKEN"]
 CRYPTO_TOKEN = os.environ["CRYPTO_TOKEN"]
 OPENROUTER_TOKEN = os.environ.get("OPENROUTER_TOKEN", "")
+IMAGE_API_KEY = os.environ.get("IMAGE_API_KEY", "")
 
 ADMINS = [8166720202, 1881900547, 8294681123]
 
@@ -76,6 +79,17 @@ CREATE TABLE IF NOT EXISTS promo_uses (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS projects (
+    project_id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    title TEXT,
+    description TEXT,
+    files_json TEXT,
+    created_at TEXT DEFAULT ''
+)
+""")
+
 for col_sql in [
     "ALTER TABLE users ADD COLUMN model TEXT DEFAULT 'llama-3.3-70b-versatile'",
     "ALTER TABLE users ADD COLUMN last_daily TEXT DEFAULT ''",
@@ -96,7 +110,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ========= ДОСТУПНЫЕ МОДЕЛИ =========
-# Groq модели (быстрые, через Groq API)
 GROQ_MODELS = {
     "llama-3.3-70b-versatile": "🏴 Llama 3.3 70B [Groq] — умный",
     "llama-3.1-8b-instant":    "🏴 Llama 3.1 8B [Groq] — быстрый",
@@ -104,7 +117,6 @@ GROQ_MODELS = {
     "gemma2-9b-it":            "🏴 Gemma 2 9B [Groq] — от Google",
 }
 
-# OpenRouter бесплатные модели
 OPENROUTER_MODELS = {
     "deepseek/deepseek-r1:free":              "🏴 DeepSeek R1 — мощное мышление",
     "deepseek/deepseek-chat-v3-0324:free":    "🏴 DeepSeek V3 — умный чат",
@@ -124,6 +136,7 @@ DEFAULT_MODEL = "llama-3.3-70b-versatile"
 def is_openrouter_model(model_id: str) -> bool:
     return "/" in model_id
 
+# ========= КЛЮЧЕВЫЕ СЛОВА =========
 ZIP_KEYWORDS = [
     "zip", "зип", "архив", "скачать", "скачай", "создай файл", "напиши файл",
     "сделай файл", "пришли файл", "отправь файл", "в файле", "файлом",
@@ -134,6 +147,34 @@ ZIP_KEYWORDS = [
     "godot", "ren'py", "renpy", "unity", "pygame", "love2d", "love ",
     "движок", "визуальная новелла", "visual novel", "платформер", "platformer",
     "шутер", "shooter", "rpg", "рпг", "аркада", "arcade",
+]
+
+IMAGE_KEYWORDS = [
+    "нарисуй", "нарисуй мне", "сгенерируй картинку", "сгенерируй изображение",
+    "создай картинку", "создай изображение", "generate image", "draw", "draw me",
+    "нарисуй картинку", "создай фото", "сделай картинку", "сделай изображение",
+    "картинка", "изображение по запросу", "арт", "generate art", "create image",
+    "create picture", "рисунок", "покажи картинку",
+]
+
+WORD_KEYWORDS = [
+    "word", "docx", "документ word", "создай документ", "сделай документ",
+    "напиши документ", "word файл", "doc файл",
+]
+
+PPT_KEYWORDS = [
+    "powerpoint", "pptx", "презентация", "создай презентацию", "сделай презентацию",
+    "напиши презентацию", "слайды", "slides", "ppt файл",
+]
+
+SURVEY_KEYWORDS = [
+    "опрос", "викторина", "quiz", "questionnaire", "тест", "вопросы и ответы",
+    "создай опрос", "сделай опрос", "создай тест", "сделай тест",
+]
+
+REMEMBER_KEYWORDS = [
+    "запомни", "вспомни", "загрузи проект", "открой проект", "продолжи проект",
+    "remember", "load project", "continue project",
 ]
 
 EXTENSIONS = {
@@ -173,8 +214,82 @@ def wants_zip(text: str) -> bool:
     t = text.lower()
     return any(kw in t for kw in ZIP_KEYWORDS)
 
+def wants_image(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in IMAGE_KEYWORDS)
+
+def wants_word(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in WORD_KEYWORDS)
+
+def wants_ppt(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in PPT_KEYWORDS)
+
+def wants_survey(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in SURVEY_KEYWORDS)
+
+def wants_remember(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in REMEMBER_KEYWORDS)
+
+# ========= ГЕНЕРАЦИЯ PROJECT ID =========
+def generate_project_id() -> str:
+    return str(uuid.uuid4())[:8].upper()
+
+def add_project_id_to_code(code: str, project_id: str, filename: str) -> str:
+    """Добавляет ID проекта в конец файла в виде комментария."""
+    ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
+    comment_styles = {
+        "py": f"\n\n# ID: {project_id}",
+        "gd": f"\n\n# ID: {project_id}",
+        "js": f"\n\n// ID: {project_id}",
+        "ts": f"\n\n// ID: {project_id}",
+        "cs": f"\n\n// ID: {project_id}",
+        "java": f"\n\n// ID: {project_id}",
+        "cpp": f"\n\n// ID: {project_id}",
+        "c": f"\n\n// ID: {project_id}",
+        "go": f"\n\n// ID: {project_id}",
+        "rs": f"\n\n// ID: {project_id}",
+        "php": f"\n\n// ID: {project_id}",
+        "kt": f"\n\n// ID: {project_id}",
+        "swift": f"\n\n// ID: {project_id}",
+        "lua": f"\n\n-- ID: {project_id}",
+        "rb": f"\n\n# ID: {project_id}",
+        "sh": f"\n\n# ID: {project_id}",
+        "sql": f"\n\n-- ID: {project_id}",
+        "html": f"\n\n<!-- ID: {project_id} -->",
+        "xml": f"\n\n<!-- ID: {project_id} -->",
+        "tscn": f"\n\n; ID: {project_id}",
+        "tres": f"\n\n; ID: {project_id}",
+        "cfg": f"\n\n; ID: {project_id}",
+        "ini": f"\n\n; ID: {project_id}",
+        "toml": f"\n\n# ID: {project_id}",
+        "yaml": f"\n\n# ID: {project_id}",
+        "yml": f"\n\n# ID: {project_id}",
+        "rpy": f"\n\n# ID: {project_id}",
+        "css": f"\n\n/* ID: {project_id} */",
+        "md": f"\n\n<!-- ID: {project_id} -->",
+    }
+    suffix = comment_styles.get(ext, f"\n\n# ID: {project_id}")
+    return code.rstrip() + suffix
+
+# ========= СОХРАНЕНИЕ ПРОЕКТА В БД =========
+def save_project(project_id: str, user_id: int, title: str, description: str, blocks: list):
+    files_data = [{"filename": fname, "code": code} for fname, code in blocks]
+    cursor.execute(
+        "INSERT OR REPLACE INTO projects (project_id, user_id, title, description, files_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, user_id, title, description, json.dumps(files_data, ensure_ascii=False), str(date.today()))
+    )
+    conn.commit()
+
+def load_project(project_id: str):
+    cursor.execute("SELECT * FROM projects WHERE project_id=?", (project_id.upper(),))
+    return cursor.fetchone()
+
+# ========= ОПРЕДЕЛЕНИЕ ТИПА ПРОЕКТА =========
 def detect_filename_from_code(code: str, ext: str, index: int) -> str:
-    """Пытается найти имя файла в первых строках кода (в комментарии)."""
     for line in code.strip().split("\n")[:5]:
         line = line.strip()
         m = re.search(r'(?:#|//|<!--|/\*)\s*([\w][\w/\-]*\.\w+)', line)
@@ -208,7 +323,6 @@ def extract_code_blocks(text: str) -> list:
     return blocks
 
 def detect_project_type(blocks: list) -> str:
-    """Определяет тип проекта по расширениям файлов."""
     exts = set()
     names = set()
     for fname, _ in blocks:
@@ -229,10 +343,57 @@ def detect_project_type(blocks: list) -> str:
         return "pygame"
     return "generic"
 
+def get_project_zip_name(project_type: str, blocks: list) -> str:
+    """Возвращает подходящее название zip-файла для проекта."""
+    names = [fname.lower() for fname, _ in blocks]
+    type_names = {
+        "godot": "godot_project",
+        "renpy": "renpy_visual_novel",
+        "unity": "unity_project",
+        "love2d": "love2d_game",
+        "html5": "web_project",
+        "pygame": "pygame_game",
+        "generic": "project",
+    }
+    return f"{type_names.get(project_type, 'project')}.zip"
+
+def ensure_godot_project_file(blocks: list) -> list:
+    """Если в блоках нет project.godot — добавляем базовый."""
+    names = [fname.lower().split("/")[-1] for fname, _ in blocks]
+    if "project.godot" not in names:
+        godot_cfg = (
+            '; Engine configuration file.\n'
+            '; It\'s best edited using the editor UI and not directly,\n'
+            '; since the properties are not in a human-readable format.\n\n'
+            '[application]\n\n'
+            'config/name="MyGame"\n'
+            'config/features=PackedStringArray("4.2", "Forward Plus")\n'
+            'config/icon="res://icon.svg"\n\n'
+            '[rendering]\n\n'
+            'renderer/rendering_method="forward_plus"\n'
+        )
+        blocks = list(blocks) + [("project.godot", godot_cfg)]
+    return blocks
+
+def ensure_renpy_project_files(blocks: list) -> list:
+    """Если в блоках нет options.rpy — добавляем базовый."""
+    names = [fname.lower().split("/")[-1] for fname, _ in blocks]
+    result = list(blocks)
+    if "options.rpy" not in names:
+        options_rpy = (
+            'define config.name = _("My Visual Novel")\n'
+            'define config.version = "1.0"\n'
+            'define config.save_directory = "MyVisualNovel-1.0"\n'
+            'define config.has_sound = True\n'
+            'define config.has_music = True\n'
+            'define config.has_voice = False\n'
+        )
+        result.append(("game/options.rpy", options_rpy))
+    return result
+
 def assign_folder(filename: str, project_type: str) -> str:
-    """Если файл уже имеет путь с папкой — не трогаем. Иначе кладём в нужную папку."""
     if "/" in filename:
-        return filename   # AI уже указал путь — сохраняем
+        return filename
 
     name = filename.lower()
     ext = filename.rsplit(".", 1)[1].lower() if "." in filename else ""
@@ -263,7 +424,7 @@ def assign_folder(filename: str, project_type: str) -> str:
         return f"Assets/Scripts/{filename}"
 
     elif project_type == "love2d":
-        if ext == "lua":                      return filename  # main.lua, conf.lua — в корень
+        if ext == "lua":                      return filename
         if ext in ("png", "jpg", "jpeg"):     return f"assets/images/{filename}"
         if ext in ("ogg", "wav", "mp3"):      return f"assets/sounds/{filename}"
         return filename
@@ -286,7 +447,7 @@ def assign_folder(filename: str, project_type: str) -> str:
         if ext in ("md", "txt"):              return filename
         return f"assets/{filename}"
 
-    else:  # generic
+    else:
         if ext in ("py",):                    return filename
         if ext in ("js", "ts"):               return f"src/{filename}"
         if ext == "css":                      return f"css/{filename}"
@@ -295,8 +456,14 @@ def assign_folder(filename: str, project_type: str) -> str:
         if ext in ("png", "jpg", "jpeg", "svg"): return f"assets/{filename}"
         return filename
 
-def build_zip(blocks: list) -> io.BytesIO:
+def build_zip(blocks: list, project_id: str = None) -> io.BytesIO:
     project_type = detect_project_type(blocks)
+
+    if project_type == "godot":
+        blocks = ensure_godot_project_file(blocks)
+    elif project_type == "renpy":
+        blocks = ensure_renpy_project_files(blocks)
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         used_names: dict = {}
@@ -308,13 +475,115 @@ def build_zip(blocks: list) -> io.BytesIO:
                 filename = f"{base}_{used_names[filename]}.{ext}" if ext else f"{base}_{used_names[filename]}"
             else:
                 used_names[filename] = 0
-            zf.writestr(filename, code.encode("utf-8"))
+
+            if project_id:
+                code_with_id = add_project_id_to_code(code, project_id, filename)
+            else:
+                code_with_id = code
+
+            zf.writestr(filename, code_with_id.encode("utf-8"))
     buf.seek(0)
     return buf
+
+# ========= СОЗДАНИЕ WORD ДОКУМЕНТА =========
+def build_word_doc(content: str) -> io.BytesIO:
+    try:
+        from docx import Document
+        from docx.shared import Pt
+        doc = Document()
+        for line in content.split("\n"):
+            line = line.strip()
+            if line.startswith("# "):
+                p = doc.add_heading(line[2:], level=1)
+            elif line.startswith("## "):
+                p = doc.add_heading(line[3:], level=2)
+            elif line.startswith("### "):
+                p = doc.add_heading(line[4:], level=3)
+            elif line.startswith("- ") or line.startswith("* "):
+                doc.add_paragraph(line[2:], style="List Bullet")
+            elif line:
+                doc.add_paragraph(line)
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        return buf
+    except ImportError:
+        return None
+
+# ========= СОЗДАНИЕ POWERPOINT ПРЕЗЕНТАЦИИ =========
+def build_ppt(content: str, title: str = "Презентация") -> io.BytesIO:
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        prs = Presentation()
+        slide_layout = prs.slide_layouts[1]
+
+        slides_raw = re.split(r'\n(?=#{1,3} )', content.strip())
+        if not slides_raw:
+            slides_raw = [content]
+
+        for slide_text in slides_raw:
+            lines = slide_text.strip().split("\n")
+            if not lines:
+                continue
+            slide_title = lines[0].lstrip("#").strip()
+            body = "\n".join(lines[1:]).strip()
+
+            slide = prs.slides.add_slide(slide_layout)
+            slide.shapes.title.text = slide_title
+            if slide.placeholders and len(slide.placeholders) > 1:
+                tf = slide.placeholders[1].text_frame
+                tf.text = body
+
+        buf = io.BytesIO()
+        prs.save(buf)
+        buf.seek(0)
+        return buf
+    except ImportError:
+        return None
+
+# ========= СОЗДАНИЕ ОПРОСА (текстовый формат) =========
+def build_survey_doc(content: str) -> io.BytesIO:
+    try:
+        from docx import Document
+        doc = Document()
+        doc.add_heading("Опрос / Тест", 0)
+        questions = re.split(r'\n(?=\d+[\.\)])', content.strip())
+        for q in questions:
+            q = q.strip()
+            if not q:
+                continue
+            lines = q.split("\n")
+            doc.add_paragraph(lines[0], style="List Number")
+            for opt in lines[1:]:
+                opt = opt.strip()
+                if opt:
+                    doc.add_paragraph(opt, style="List Bullet 2")
+            doc.add_paragraph("")
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        return buf
+    except ImportError:
+        return None
+
+# ========= ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ =========
+async def generate_image(prompt: str) -> bytes | None:
+    """Генерирует изображение через pollinations.ai (бесплатно, без API ключа)."""
+    try:
+        import urllib.parse
+        encoded = urllib.parse.quote(prompt)
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
+        r = requests.get(url, timeout=60)
+        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+            return r.content
+        return None
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        return None
+
 # ========= ФОРМАТИРОВАНИЕ ОТВЕТА С КОДОМ =========
 def format_ai_reply_html(text: str) -> list:
-    """Разбивает ответ AI на части: обычный текст и блоки кода.
-    Возвращает список (html_chunk, is_code) для отправки по частям."""
     pattern = r"```(\w*)\n?([\s\S]*?)```"
     parts = []
     last_end = 0
@@ -393,7 +662,6 @@ def models_keyboard(current_model):
 
 # ========= ОТПРАВКА / ЗАМЕНА СООБЩЕНИЙ =========
 async def send_photo_msg(target, text, markup=None):
-    """Отправляет новое сообщение с фото (только для /start по команде)."""
     try:
         with open(WELCOME_IMAGE, "rb") as photo:
             await target.reply_photo(photo=photo, caption=text, parse_mode="HTML", reply_markup=markup)
@@ -401,7 +669,6 @@ async def send_photo_msg(target, text, markup=None):
         await target.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
 async def replace_msg(message, text, markup=None):
-    """Редактирует существующее сообщение вместо отправки нового."""
     try:
         await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
     except Exception:
@@ -415,7 +682,6 @@ async def replace_msg(message, text, markup=None):
             await message.chat.send_message(text, parse_mode="HTML", reply_markup=markup)
 
 async def replace_msg_photo(message, text, markup=None):
-    """Редактирует сообщение с фото или пересоздаёт его."""
     try:
         await message.edit_caption(caption=text, parse_mode="HTML", reply_markup=markup)
     except Exception:
@@ -460,18 +726,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     row = cursor.fetchone()
     reqs = row[0] if row else 10
 
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-
     bonus_line = "\n🏴‍☠️ <b>+5 ежедневных запросов начислено!</b>" if got_bonus else ""
 
     text = (
-        f"<b>Приветствую, это нейросеть, вшитая в телеграм-бота.\n"
-        f"Этот бот создан одним человеком за короткий промежуток времени и без бюджета. 🏴‍☠️\n\n"
-        f"🏴‍☠️ Пользователей в боте: {total_users}\n\n"
-        f"Ваша реферальная ссылка:\n{ref_link}\n\n"
-        f"🏴‍☠️ Доступно запросов: {reqs}{bonus_line}\n\n"
-        f"Создатель бота: @strongbyte. 🏴‍☠️</b>"
+        f"<b>CosmoAI — искусственный интеллект прямо в Telegram! 🏴‍☠️</b>\n\n"
+        f"<blockquote>🖤 Бот создан одним человеком за короткое время.</blockquote>\n\n"
+        f"<blockquote>⚠️ Бот только учится — иногда может ошибаться, перепроверяй важную информацию!</blockquote>\n\n"
+        f"<b>Бот умеет:</b>\n"
+        f"<blockquote>🎤 Расшифровывать голосовые сообщения</blockquote>\n"
+        f"<blockquote>📦 Отправлять готовые ZIP-проекты (Godot, Pygame, HTML5, Ren'Py и др.)</blockquote>\n"
+        f"<blockquote>🧠 Отвечать на сложные вопросы и задачи</blockquote>\n"
+        f"<blockquote>📝 Создавать документы Word и презентации PowerPoint</blockquote>\n"
+        f"<blockquote>📊 Составлять опросы и тесты</blockquote>\n"
+        f"<blockquote>🎨 Генерировать картинки по описанию</blockquote>\n"
+        f"<blockquote>🔁 Запоминать проекты по ID — пришли ID чтобы продолжить работу</blockquote>\n\n"
+        f"🏴‍☠️ Твоя реферальная ссылка:\n<code>{ref_link}</code>\n\n"
+        f"🏴‍☠️ Доступно запросов: <b>{reqs}</b>{bonus_line}\n\n"
+        f"<b>Создатель бота: @strongbyte ❤️ 🏴‍☠️</b>"
     )
 
     if update.message:
@@ -496,7 +767,8 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["chat"] = True
         context.user_data["history"] = []
         await replace_msg(q.message,
-            "<b>🏴‍☠️ Жду запроса!\n\nНовый диалог начат — пиши что хочешь.</b>",
+            "<b>🏴‍☠️ Жду запроса!\n\nНовый диалог начат — пиши что хочешь.\n\n"
+            "Могу создать: проект, картинку, Word/PowerPoint, опрос. Просто скажи!</b>",
             chat_keyboard()
         )
 
@@ -510,6 +782,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif q.data == "reset_chat":
         context.user_data["history"] = []
+        context.user_data.pop("current_project_id", None)
         await replace_msg(q.message,
             "<b>🏴‍☠️ Диалог сброшен. Начинаем заново!</b>",
             chat_keyboard()
@@ -632,9 +905,31 @@ SYSTEM_PROMPT = (
     "ОБЩЕЕ: создавай ПОЛНЫЙ готовый проект который можно сразу запустить."
 )
 
-async def ask_ai(user_id, history):
+WORD_SYSTEM_PROMPT = (
+    "Ты помощник для создания документов. Напиши содержимое документа в простом тексте. "
+    "Используй # для заголовков первого уровня, ## для второго, ### для третьего. "
+    "Используй - для списков. Пиши развёрнуто и профессионально. "
+    "Только текст, без markdown блоков кода."
+)
+
+PPT_SYSTEM_PROMPT = (
+    "Ты помощник для создания презентаций. Напиши содержимое слайдов. "
+    "Каждый слайд начинается с # Заголовок слайда. "
+    "Под заголовком — основной текст слайда (2-5 пунктов). "
+    "Создай 5-10 слайдов. Только текст, без markdown блоков кода."
+)
+
+SURVEY_SYSTEM_PROMPT = (
+    "Ты помощник для создания опросов и тестов. "
+    "Напиши вопросы с вариантами ответов. Формат: "
+    "1. Вопрос?\n   а) Вариант\n   б) Вариант\n   в) Вариант\n\n"
+    "Создай 5-15 вопросов. Только текст, без markdown блоков кода."
+)
+
+async def ask_ai(user_id, history, system_override=None):
     selected_model = get_user_model(user_id)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+    sys_prompt = system_override if system_override else SYSTEM_PROMPT
+    messages = [{"role": "system", "content": sys_prompt}] + history
 
     if is_openrouter_model(selected_model):
         if not OPENROUTER_TOKEN:
@@ -662,6 +957,45 @@ async def ask_ai(user_id, history):
         raise ValueError(f"No choices in response: {data}")
     return data["choices"][0]["message"]["content"]
 
+# ========= ОБРАБОТКА ЗАГРУЗКИ ПРОЕКТА =========
+def extract_project_id_from_text(text: str) -> str | None:
+    """Ищет 8-символьный ID проекта в тексте."""
+    m = re.search(r'\b([A-F0-9]{8})\b', text.upper())
+    if m:
+        return m.group(1)
+    return None
+
+async def handle_project_load(update, context, project_id: str):
+    row = load_project(project_id)
+    if not row:
+        await update.message.reply_text(
+            f"<b>🏴‍☠️ Проект с ID <code>{project_id}</code> не найден.</b>",
+            parse_mode="HTML"
+        )
+        return False
+
+    _, uid, title, description, files_json, created_at = row
+    files_data = json.loads(files_json)
+
+    context.user_data["chat"] = True
+    context.user_data["current_project_id"] = project_id
+
+    files_list = "\n".join(f"  • {f['filename']}" for f in files_data)
+    history_entry = f"Загружен проект '{title}' (ID: {project_id}). Файлы:\n{files_list}\n\nОписание: {description}"
+    context.user_data["history"] = [{"role": "assistant", "content": history_entry}]
+
+    await update.message.reply_text(
+        f"<b>🏴‍☠️ Проект загружен!\n\n"
+        f"📦 Название: {html.escape(title or 'Без названия')}\n"
+        f"🆔 ID: <code>{project_id}</code>\n"
+        f"📅 Создан: {created_at}\n\n"
+        f"Файлы:\n{html.escape(files_list)}\n\n"
+        f"Продолжаю работу с проектом. Что делать дальше?</b>",
+        parse_mode="HTML",
+        reply_markup=chat_keyboard()
+    )
+    return True
+
 # ========= ЧАТ (текст) =========
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -671,10 +1005,20 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not row or row[0] == 1:
         return
 
+    text = update.message.text
+
+    # Проверка: просто ID проекта (или ID + ключевое слово)
+    project_id_candidate = extract_project_id_from_text(text)
+    if project_id_candidate:
+        short_text = text.strip().upper()
+        is_only_id = re.match(r'^[A-F0-9]{8}$', short_text)
+        has_remember_kw = wants_remember(text)
+        if is_only_id or has_remember_kw:
+            await handle_project_load(update, context, project_id_candidate)
+            return
+
     if not context.user_data.get("chat"):
         return
-
-    text = update.message.text
 
     cursor.execute("SELECT requests FROM users WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
@@ -690,6 +1034,152 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ========= КАРТИНКИ — обрабатываем ПЕРВЫМИ, до AI =========
+    if wants_image(text):
+        thinking_msg = await update.message.reply_text("<b>🎨 Генерирую картинку...</b>", parse_mode="HTML")
+        try:
+            image_bytes = await generate_image(text)
+            await thinking_msg.delete()
+            if image_bytes:
+                cursor.execute("UPDATE users SET requests = requests - 1, total_used = total_used + 1 WHERE user_id=?", (user_id,))
+                conn.commit()
+                buf = io.BytesIO(image_bytes)
+                buf.name = "image.jpg"
+                await update.message.reply_photo(
+                    photo=buf,
+                    caption=f"<b>🎨 Картинка по запросу: {html.escape(text[:100])}</b>",
+                    parse_mode="HTML",
+                    reply_markup=chat_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    "<b>🏴‍☠️ Не удалось сгенерировать картинку. Попробуй описать по-другому.</b>",
+                    parse_mode="HTML",
+                    reply_markup=chat_keyboard()
+                )
+        except Exception as e:
+            logger.error(f"Image error: {e}")
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                pass
+            await update.message.reply_text("<b>🏴‍☠️ Ошибка генерации картинки.</b>", parse_mode="HTML")
+        return
+
+    # ========= WORD ДОКУМЕНТ =========
+    if wants_word(text):
+        thinking_msg = await update.message.reply_text("<b>📝 Создаю Word документ...</b>", parse_mode="HTML")
+        try:
+            history = context.user_data.get("history", [])
+            history.append({"role": "user", "content": text})
+            ai_content = await ask_ai(user_id, history, system_override=WORD_SYSTEM_PROMPT)
+            history.append({"role": "assistant", "content": ai_content})
+            context.user_data["history"] = history[-20:]
+
+            cursor.execute("UPDATE users SET requests = requests - 1, total_used = total_used + 1 WHERE user_id=?", (user_id,))
+            conn.commit()
+
+            await thinking_msg.delete()
+            doc_buf = build_word_doc(ai_content)
+            if doc_buf:
+                fname = "document.docx"
+                await update.message.reply_document(
+                    document=doc_buf,
+                    filename=fname,
+                    caption="<b>📝 Ваш Word документ готов!</b>",
+                    parse_mode="HTML",
+                    reply_markup=chat_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    f"<b>📝 Содержимое документа:\n\n{html.escape(ai_content[:3000])}</b>",
+                    parse_mode="HTML",
+                    reply_markup=chat_keyboard()
+                )
+        except Exception as e:
+            logger.error(f"Word error: {e}")
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                pass
+            await update.message.reply_text("<b>🏴‍☠️ Ошибка создания документа.</b>", parse_mode="HTML")
+        return
+
+    # ========= POWERPOINT ПРЕЗЕНТАЦИЯ =========
+    if wants_ppt(text):
+        thinking_msg = await update.message.reply_text("<b>📊 Создаю презентацию PowerPoint...</b>", parse_mode="HTML")
+        try:
+            history = context.user_data.get("history", [])
+            history.append({"role": "user", "content": text})
+            ai_content = await ask_ai(user_id, history, system_override=PPT_SYSTEM_PROMPT)
+            history.append({"role": "assistant", "content": ai_content})
+            context.user_data["history"] = history[-20:]
+
+            cursor.execute("UPDATE users SET requests = requests - 1, total_used = total_used + 1 WHERE user_id=?", (user_id,))
+            conn.commit()
+
+            await thinking_msg.delete()
+            ppt_buf = build_ppt(ai_content, title=text[:50])
+            if ppt_buf:
+                await update.message.reply_document(
+                    document=ppt_buf,
+                    filename="presentation.pptx",
+                    caption="<b>📊 Ваша презентация PowerPoint готова!</b>",
+                    parse_mode="HTML",
+                    reply_markup=chat_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    f"<b>📊 Содержимое презентации:\n\n{html.escape(ai_content[:3000])}</b>",
+                    parse_mode="HTML",
+                    reply_markup=chat_keyboard()
+                )
+        except Exception as e:
+            logger.error(f"PPT error: {e}")
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                pass
+            await update.message.reply_text("<b>🏴‍☠️ Ошибка создания презентации.</b>", parse_mode="HTML")
+        return
+
+    # ========= ОПРОС / ТЕСТ =========
+    if wants_survey(text):
+        thinking_msg = await update.message.reply_text("<b>📋 Создаю опрос...</b>", parse_mode="HTML")
+        try:
+            history = context.user_data.get("history", [])
+            history.append({"role": "user", "content": text})
+            ai_content = await ask_ai(user_id, history, system_override=SURVEY_SYSTEM_PROMPT)
+            history.append({"role": "assistant", "content": ai_content})
+            context.user_data["history"] = history[-20:]
+
+            cursor.execute("UPDATE users SET requests = requests - 1, total_used = total_used + 1 WHERE user_id=?", (user_id,))
+            conn.commit()
+
+            await thinking_msg.delete()
+            survey_buf = build_survey_doc(ai_content)
+            if survey_buf:
+                await update.message.reply_document(
+                    document=survey_buf,
+                    filename="survey.docx",
+                    caption="<b>📋 Ваш опрос готов!</b>",
+                    parse_mode="HTML",
+                    reply_markup=chat_keyboard()
+                )
+            else:
+                for chunk in [ai_content[i:i+4000] for i in range(0, len(ai_content), 4000)]:
+                    await update.message.reply_text(f"<b>{html.escape(chunk)}</b>", parse_mode="HTML")
+                await update.message.reply_text("", reply_markup=chat_keyboard())
+        except Exception as e:
+            logger.error(f"Survey error: {e}")
+            try:
+                await thinking_msg.delete()
+            except Exception:
+                pass
+            await update.message.reply_text("<b>🏴‍☠️ Ошибка создания опроса.</b>", parse_mode="HTML")
+        return
+
+    # ========= ОБЫЧНЫЙ AI ЧАТ / ZIP ПРОЕКТ =========
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": text})
 
@@ -713,18 +1203,32 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     blocks = extract_code_blocks(ai_reply)
     if blocks and wants_zip(text):
-        zip_buf = build_zip(blocks)
+        project_id = context.user_data.get("current_project_id") or generate_project_id()
+        context.user_data["current_project_id"] = project_id
+
+        project_type = detect_project_type(blocks)
+        zip_name = get_project_zip_name(project_type, blocks)
+
+        save_project(project_id, user_id, text[:80], ai_reply[:200], blocks)
+
+        zip_buf = build_zip(blocks, project_id=project_id)
         names = ", ".join(f[0] for f in blocks)
+
         for chunk, _ in format_ai_reply_html(ai_reply):
             if len(chunk) > 4000:
                 for i in range(0, len(chunk), 4000):
                     await update.message.reply_text(chunk[i:i+4000], parse_mode="HTML")
             else:
                 await update.message.reply_text(chunk, parse_mode="HTML")
+
         await update.message.reply_document(
             document=zip_buf,
-            filename="files.zip",
-            caption=f"<b>🏴‍☠️ Файлы: {html.escape(names)}</b>",
+            filename=zip_name,
+            caption=(
+                f"<b>📦 Проект: {html.escape(names[:200])}\n\n"
+                f"🆔 ID проекта: <code>{project_id}</code>\n"
+                f"💡 Пришли этот ID чтобы продолжить работу с проектом в любое время!</b>"
+            ),
             parse_mode="HTML",
             reply_markup=chat_keyboard()
         )
@@ -787,7 +1291,6 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("<b>🏴‍☠️ Не смог распознать голос. Попробуй ещё раз.</b>", parse_mode="HTML")
             return
 
-        # Режим только расшифровки — просто возвращаем текст
         if voice_only:
             await thinking_msg.delete()
             await update.message.reply_text(
@@ -797,7 +1300,6 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Режим чата — расшифровка + отправка в AI
         cursor.execute("SELECT requests FROM users WHERE user_id=?", (user_id,))
         row = cursor.fetchone()
         req = row[0] if row else 0
@@ -1124,6 +1626,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT SUM(uses_count) FROM promo_codes")
     promo_uses = cursor.fetchone()[0] or 0
 
+    cursor.execute("SELECT COUNT(*) FROM projects")
+    proj_count = cursor.fetchone()[0]
+
     await update.message.reply_text(
         f"<b>🏴‍☠️ Статистика бота\n\n"
         f"🏴‍☠️ Всего пользователей: {total}\n"
@@ -1131,7 +1636,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏴‍☠️ Оплаченных счетов: {paid}\n"
         f"🏴‍☠️ Всего запросов к AI: {all_used}\n"
         f"🏴‍☠️ Промокодов создано: {promo_count}\n"
-        f"🏴‍☠️ Промокодов активировано: {promo_uses}</b>",
+        f"🏴‍☠️ Промокодов активировано: {promo_uses}\n"
+        f"🏴‍☠️ Проектов сохранено: {proj_count}</b>",
         parse_mode="HTML"
     )
 
@@ -1172,7 +1678,6 @@ async def check_payments(context: ContextTypes.DEFAULT_TYPE):
                         pass
     except Exception as e:
         logger.error(f"Payment check error: {e}")
-
 
 # ========= ЗАПУСК =========
 async def post_init(application):
