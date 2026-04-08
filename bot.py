@@ -730,19 +730,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"<b>CosmoAI — искусственный интеллект прямо в Telegram! 🏴‍☠️</b>\n\n"
-        f"<blockquote>🖤 Бот создан одним человеком за короткое время.</blockquote>\n\n"
-        f"<blockquote>⚠️ Бот только учится — иногда может ошибаться, перепроверяй важную информацию!</blockquote>\n\n"
+        f"<blockquote>🏴 Бот только учится — иногда может ошибаться, перепроверяй важную информацию!</blockquote>\n\n"
         f"<b>Бот умеет:</b>\n"
-        f"<blockquote>🎤 Расшифровывать голосовые сообщения</blockquote>\n"
-        f"<blockquote>📦 Отправлять готовые ZIP-проекты (Godot, Pygame, HTML5, Ren'Py и др.)</blockquote>\n"
-        f"<blockquote>🧠 Отвечать на сложные вопросы и задачи</blockquote>\n"
-        f"<blockquote>📝 Создавать документы Word и презентации PowerPoint</blockquote>\n"
-        f"<blockquote>📊 Составлять опросы и тесты</blockquote>\n"
-        f"<blockquote>🎨 Генерировать картинки по описанию</blockquote>\n"
-        f"<blockquote>🔁 Запоминать проекты по ID — пришли ID чтобы продолжить работу</blockquote>\n\n"
-        f"🏴‍☠️ Твоя реферальная ссылка:\n<code>{ref_link}</code>\n\n"
-        f"🏴‍☠️ Доступно запросов: <b>{reqs}</b>{bonus_line}\n\n"
-        f"<b>Создатель бота: @strongbyte ❤️ 🏴‍☠️</b>"
+        f"<blockquote>🎓 Расшифровывать голосовые сообщения</blockquote>\n"
+        f"<blockquote>🎓 Отправлять готовые ZIP-проекты (Godot, Pygame, HTML5, Ren'Py)</blockquote>\n"
+        f"<blockquote>🎓 Отвечать на вопросы и задачи</blockquote>\n"
+        f"<blockquote>🎓 Создавать Word документы и PowerPoint презентации</blockquote>\n"
+        f"<blockquote>🎓 Составлять опросы и тесты</blockquote>\n"
+        f"<blockquote>🎓 Генерировать картинки по описанию</blockquote>\n"
+        f"<blockquote>🎓 Запоминать проекты по ID</blockquote>\n\n"
+        f"🏴‍☠️ Реферальная ссылка: <code>{ref_link}</code>\n"
+        f"🏴‍☠️ Запросов: <b>{reqs}</b>{bonus_line}\n\n"
+        f"<b>Создатель: @strongbyte 🏴‍☠️</b>"
     )
 
     if update.message:
