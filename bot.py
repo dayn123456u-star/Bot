@@ -1,3 +1,4 @@
+import asyncio
 import html
 import io
 import logging
@@ -1504,20 +1505,40 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("<b>🏴‍☠️ Укажи текст: /textTOP <сообщение></b>", parse_mode="HTML")
         return
 
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
+    # Получаем всех пользователей ДО async операций — отдельным соединением
+    tmp_conn = sqlite3.connect(_DB_PATH)
+    tmp_cur = tmp_conn.cursor()
+    tmp_cur.execute("SELECT user_id FROM users WHERE banned=0")
+    all_users = [row[0] for row in tmp_cur.fetchall()]
+    total = len(all_users)
+    tmp_conn.close()
+
+    status_msg = await update.message.reply_text(
+        f"<b>🏴‍☠️ Начинаю рассылку {total} пользователям...</b>",
+        parse_mode="HTML"
+    )
 
     sent = 0
     failed = 0
-    for (uid,) in users:
+    blocked = 0
+    for uid in all_users:
         try:
             await context.bot.send_message(uid, f"<b>{message}</b>", parse_mode="HTML")
             sent += 1
-        except Exception:
-            failed += 1
+        except Exception as e:
+            err = str(e).lower()
+            if "blocked" in err or "forbidden" in err or "deactivated" in err:
+                blocked += 1
+            else:
+                failed += 1
+        await asyncio.sleep(0.05)
 
-    await update.message.reply_text(
-        f"<b>🏴‍☠️ Рассылка завершена\n🏴‍☠️ Отправлено: {sent}\n🏴‍☠️ Не доставлено: {failed}</b>",
+    await status_msg.edit_text(
+        f"<b>🏴‍☠️ Рассылка завершена!\n\n"
+        f"🏴 Всего в базе: {total}\n"
+        f"🎓 Доставлено: {sent}\n"
+        f"🏴 Заблокировали бота: {blocked}\n"
+        f"🏴 Другие ошибки: {failed}</b>",
         parse_mode="HTML"
     )
 
