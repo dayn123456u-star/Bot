@@ -32,9 +32,9 @@ FISH_AUDIO_TOKEN = os.environ.get("FISH_AUDIO_TOKEN", "")
 ADMINS = [8166720202, 1881900547, 8294681123]
 
 CRYPTO_API = "https://pay.crypt.bot/api/"
-WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "attached_assets", "welcome_1775130238071.png")
+WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "attached_assets", "089e36149455eb432c2afd94fe5f4bd8_1775834811270.jpg")
 if not os.path.exists(WELCOME_IMAGE):
-    WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "welcome.png")
+    WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "welcome.jpg")
 
 # ========= БД =========
 _DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "bot.db"))
@@ -1121,8 +1121,17 @@ async def replace_msg(message, text, markup=None):
     try:
         await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
     except Exception:
+        # Если сообщение содержит медиа (фото, документ и т.д.) — удаляем и шлём новое текстовое
+        # Нельзя edit_caption — иначе фото прилипнет к меню
         try:
-            await message.edit_caption(caption=text, parse_mode="HTML", reply_markup=markup)
+            if message.photo or message.document or message.audio or message.video or message.animation or message.sticker:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                await message.chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+            else:
+                await message.edit_caption(caption=text, parse_mode="HTML", reply_markup=markup)
         except Exception:
             try:
                 await message.delete()
@@ -1196,7 +1205,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await send_photo_msg(update.message, text, menu())
     elif update.callback_query:
-        await replace_msg_photo(update.callback_query.message, text, menu())
+        await replace_msg(update.callback_query.message, text, menu())
 
 # ========= ADMIN ПРОВЕРКА =========
 def is_admin(user_id):
@@ -1269,11 +1278,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "так как мне тупо лень делать такую функцию, мне главное, чтобы работало, и всё, ваши запросы не будут нигде использоваться и распространяться, "
             "вы полностью анонимны.!</b>"
         )
-        await replace_msg_photo(q.message, text, back())
+        await replace_msg(q.message, text, back())
 
     elif q.data == "support":
         text = "<b>🏴‍☠️ Поддержка\n\nПо всем вопросам: @strongbyte</b>"
-        await replace_msg_photo(q.message, text, back())
+        await replace_msg(q.message, text, back())
 
     elif q.data == "buy":
         await replace_msg(q.message,
