@@ -27,6 +27,7 @@ AI_TOKEN = os.environ["GROK_TOKEN"]
 CRYPTO_TOKEN = os.environ["CRYPTO_TOKEN"]
 OPENROUTER_TOKEN = os.environ.get("OPENROUTER_TOKEN", "")
 IMAGE_API_KEY = os.environ.get("IMAGE_API_KEY", "")
+FISH_AUDIO_TOKEN = os.environ.get("FISH_AUDIO_TOKEN", "")
 
 ADMINS = [8166720202, 1881900547, 8294681123]
 
@@ -36,8 +37,7 @@ if not os.path.exists(WELCOME_IMAGE):
     WELCOME_IMAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "welcome.png")
 
 # ========= БД =========
-_DB_PATH = os.environ.get("DB_PATH", "/data/bot.db")
-os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+_DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "bot.db"))
 conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -88,6 +88,25 @@ CREATE TABLE IF NOT EXISTS projects (
     description TEXT,
     files_json TEXT,
     created_at TEXT DEFAULT ''
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS user_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    fact TEXT,
+    created_at TEXT DEFAULT ''
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    remind_at TEXT,
+    text TEXT,
+    sent INTEGER DEFAULT 0
 )
 """)
 
@@ -583,6 +602,403 @@ async def generate_image(prompt: str) -> bytes | None:
         logger.error(f"Image generation error: {e}")
         return None
 
+# ========= КЛОНИРОВАНИЕ ГОЛОСА (Fish Audio) =========
+async def clone_voice_and_speak(sample_bytes: bytes, text: str) -> bytes | None:
+    """
+    Клонирует голос через Fish Audio API.
+    Образец передаётся напрямую в запрос — просто и быстро.
+    Возвращает байты MP3 аудио или None при ошибке.
+    """
+    if not FISH_AUDIO_TOKEN:
+        return None
+
+    try:
+        import msgpack
+    except ImportError:
+        logger.error("msgpack не установлен. Выполни: pip install msgpack")
+        return None
+
+    try:
+        payload = msgpack.packb({
+            "text": text,
+            "references": [
+                {
+                    "audio": sample_bytes,
+                    "text": ""
+                }
+            ],
+            "format": "mp3",
+            "mp3_bitrate": 128,
+            "latency": "normal",
+            "normalize": True,
+        }, use_bin_type=True)
+
+        r = requests.post(
+            "https://api.fish.audio/v1/tts",
+            headers={
+                "Authorization": f"Bearer {FISH_AUDIO_TOKEN}",
+                "Content-Type": "application/msgpack",
+            },
+            data=payload,
+            timeout=120
+        )
+
+        if r.status_code == 200:
+            return r.content
+
+        logger.error(f"Fish Audio TTS error: {r.status_code} {r.text[:300]}")
+        return None
+
+    except Exception as e:
+        logger.error(f"Voice clone error: {e}")
+        return None
+
+# ========= АНАЛИЗ ИЗОБРАЖЕНИЙ (Grok Vision) =========
+async def analyze_image_with_ai(image_bytes: bytes, prompt: str = "Опиши подробно что на этом изображении") -> str | None:
+    try:
+        import base64
+        b64 = base64.b64encode(image_bytes).decode()
+        payload = {
+            "model": "grok-2-vision-latest",
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": prompt}
+            ]}],
+            "max_tokens": 1000
+        }
+        r = requests.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {AI_TOKEN}", "Content-Type": "application/json"},
+            json=payload, timeout=45
+        )
+        data = r.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"Vision error: {e}")
+        return None
+
+# ========= РЕДАКТИРОВАНИЕ ФОТО (Pillow) =========
+def edit_photo_pillow(image_bytes: bytes, instruction: str) -> bytes | None:
+    try:
+        from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        ins = instruction.lower()
+
+        if any(w in ins for w in ["черно", "чёрно", "grayscale", "чб", "black"]):
+            img = ImageOps.grayscale(img).convert("RGB")
+        elif any(w in ins for w in ["зеркал", "отраз", "flip", "mirror"]):
+            img = ImageOps.mirror(img)
+        elif any(w in ins for w in ["поворот", "поверни", "rotate"]):
+            angle = 90
+            for num in re.findall(r'\d+', ins):
+                angle = int(num)
+                break
+            img = img.rotate(angle, expand=True)
+        elif any(w in ins for w in ["размы", "blur", "размыть"]):
+            img = img.filter(ImageFilter.GaussianBlur(radius=4))
+        elif any(w in ins for w in ["резк", "sharpen", "четкость", "чёткость"]):
+            img = img.filter(ImageFilter.SHARPEN)
+        elif any(w in ins for w in ["яркост", "brightnes", "светлее", "ярче"]):
+            img = ImageEnhance.Brightness(img).enhance(1.5)
+        elif any(w in ins for w in ["темн", "darker", "затемн"]):
+            img = ImageEnhance.Brightness(img).enhance(0.6)
+        elif any(w in ins for w in ["контраст", "contrast"]):
+            img = ImageEnhance.Contrast(img).enhance(1.8)
+        elif any(w in ins for w in ["насыщ", "saturat", "цветн"]):
+            img = ImageEnhance.Color(img).enhance(2.0)
+        elif any(w in ins for w in ["инверт", "негат", "invert"]):
+            img = ImageOps.invert(img)
+        else:
+            return None
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.error(f"Photo edit error: {e}")
+        return None
+
+# ========= QR-КОД =========
+def generate_qr(text: str) -> bytes | None:
+    try:
+        import qrcode
+        qr = qrcode.QRCode(version=1, box_size=10, border=4)
+        qr.add_data(text)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.error(f"QR error: {e}")
+        return None
+
+# ========= ПОГОДА =========
+def get_weather(city: str) -> str | None:
+    try:
+        r = requests.get(f"https://wttr.in/{requests.utils.quote(city)}?format=j1&lang=ru", timeout=10)
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        cur = d["current_condition"][0]
+        desc = cur["lang_ru"][0]["value"]
+        temp = cur["temp_C"]
+        feels = cur["FeelsLikeC"]
+        wind = cur["windspeedKmph"]
+        humidity = cur["humidity"]
+        return (
+            f"🌍 <b>{city}</b>\n\n"
+            f"🌡 Температура: <b>{temp}°C</b> (ощущается как {feels}°C)\n"
+            f"💧 Влажность: <b>{humidity}%</b>\n"
+            f"💨 Ветер: <b>{wind} км/ч</b>\n"
+            f"☁️ Состояние: <b>{desc}</b>"
+        )
+    except Exception as e:
+        logger.error(f"Weather error: {e}")
+        return None
+
+# ========= ПОИСК В ИНТЕРНЕТЕ =========
+def search_web(query: str) -> str | None:
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        if not results:
+            return None
+        text = f"Результаты поиска по запросу «{query}»:\n\n"
+        for i, r in enumerate(results, 1):
+            text += f"{i}. {r['title']}\n{r['body']}\n🔗 {r['href']}\n\n"
+        return text
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        return None
+
+# ========= YOUTUBE СУБТИТРЫ =========
+def get_youtube_transcript(url: str) -> str | None:
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        import re as _re
+        vid_match = _re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', url)
+        if not vid_match:
+            return None
+        vid_id = vid_match.group(1)
+        transcript = YouTubeTranscriptApi.get_transcript(vid_id, languages=["ru", "en", "uk"])
+        text = " ".join(t["text"] for t in transcript)
+        return text[:6000]
+    except Exception as e:
+        logger.error(f"YouTube transcript error: {e}")
+        return None
+
+# ========= PDF =========
+def build_pdf(content: str, title: str = "Документ") -> bytes | None:
+    try:
+        from fpdf import FPDF
+        pdf = FPDF()
+        pdf.add_page()
+        font_path = None
+        try:
+            import urllib.request
+            font_url = "https://github.com/google/fonts/raw/main/ofl/dejavu/DejaVuSans.ttf"
+            font_path = tempfile.mktemp(suffix=".ttf")
+            urllib.request.urlretrieve(font_url, font_path)
+            pdf.add_font("DejaVu", "", font_path, uni=True)
+            pdf.set_font("DejaVu", size=12)
+        except Exception:
+            pdf.set_font("Helvetica", size=12)
+
+        pdf.set_title(title)
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                pdf.ln(4)
+            elif line.startswith("# "):
+                pdf.set_font_size(18)
+                pdf.multi_cell(0, 10, line[2:])
+                pdf.set_font_size(12)
+            elif line.startswith("## "):
+                pdf.set_font_size(14)
+                pdf.multi_cell(0, 8, line[3:])
+                pdf.set_font_size(12)
+            else:
+                try:
+                    pdf.multi_cell(0, 7, line)
+                except Exception:
+                    pdf.multi_cell(0, 7, line.encode("latin-1", "replace").decode("latin-1"))
+        buf = io.BytesIO(pdf.output())
+        buf.seek(0)
+        if font_path and os.path.exists(font_path):
+            os.unlink(font_path)
+        return buf.read()
+    except Exception as e:
+        logger.error(f"PDF error: {e}")
+        return None
+
+# ========= EXCEL =========
+def build_excel(content: str, title: str = "Таблица") -> bytes | None:
+    try:
+        import xlsxwriter
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf)
+        ws = wb.add_worksheet(title[:31])
+        bold = wb.add_format({"bold": True, "bg_color": "#2C2C2C", "font_color": "#FFFFFF"})
+        normal = wb.add_format({"border": 1})
+        row = 0
+        for line in content.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if "|" in line:
+                cols = [c.strip() for c in line.split("|") if c.strip()]
+                fmt = bold if row == 0 else normal
+                for col, val in enumerate(cols):
+                    ws.write(row, col, val, fmt)
+            elif line.startswith("# "):
+                ws.merge_range(row, 0, row, 5, line[2:], bold)
+            else:
+                ws.write(row, 0, line, normal)
+            row += 1
+        wb.close()
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.error(f"Excel error: {e}")
+        return None
+
+# ========= ВЫПОЛНЕНИЕ КОДА =========
+async def run_code_sandbox(code: str, lang: str = "python") -> str:
+    try:
+        import subprocess
+        if lang == "python":
+            with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False, encoding="utf-8") as f:
+                f.write(code)
+                fname = f.name
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "python3", fname,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    return "⏱ Время выполнения истекло (10 сек)"
+                output = stdout.decode("utf-8", "replace")
+                errors = stderr.decode("utf-8", "replace")
+                result = ""
+                if output:
+                    result += f"📤 Вывод:\n<code>{output[:2000]}</code>"
+                if errors:
+                    result += f"\n⚠️ Ошибки:\n<code>{errors[:1000]}</code>"
+                return result or "✅ Выполнено без вывода"
+            finally:
+                os.unlink(fname)
+        else:
+            return "⚠️ Поддерживается только Python"
+    except Exception as e:
+        logger.error(f"Code run error: {e}")
+        return f"❌ Ошибка: {e}"
+
+# ========= ПАМЯТЬ ПОЛЬЗОВАТЕЛЯ =========
+def save_user_fact(user_id: int, fact: str):
+    from datetime import datetime
+    tmp = sqlite3.connect(_DB_PATH)
+    tmp.execute("INSERT INTO user_memory (user_id, fact, created_at) VALUES (?,?,?)",
+                (user_id, fact, datetime.now().isoformat()))
+    tmp.commit()
+    tmp.close()
+
+def get_user_facts(user_id: int) -> list:
+    tmp = sqlite3.connect(_DB_PATH)
+    rows = tmp.execute("SELECT fact FROM user_memory WHERE user_id=? ORDER BY id DESC LIMIT 20", (user_id,)).fetchall()
+    tmp.close()
+    return [r[0] for r in rows]
+
+def clear_user_facts(user_id: int):
+    tmp = sqlite3.connect(_DB_PATH)
+    tmp.execute("DELETE FROM user_memory WHERE user_id=?", (user_id,))
+    tmp.commit()
+    tmp.close()
+
+# ========= НАПОМИНАНИЯ =========
+def add_reminder(user_id: int, remind_at: str, text: str):
+    tmp = sqlite3.connect(_DB_PATH)
+    tmp.execute("INSERT INTO reminders (user_id, remind_at, text) VALUES (?,?,?)", (user_id, remind_at, text))
+    tmp.commit()
+    tmp.close()
+
+def get_user_reminders(user_id: int) -> list:
+    tmp = sqlite3.connect(_DB_PATH)
+    rows = tmp.execute(
+        "SELECT id, remind_at, text FROM reminders WHERE user_id=? AND sent=0 ORDER BY remind_at",
+        (user_id,)
+    ).fetchall()
+    tmp.close()
+    return rows
+
+async def check_reminders_job(context):
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    tmp = sqlite3.connect(_DB_PATH)
+    rows = tmp.execute(
+        "SELECT id, user_id, text FROM reminders WHERE sent=0 AND remind_at <= ?", (now,)
+    ).fetchall()
+    for row_id, user_id, text in rows:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"⏰ <b>Напоминание!</b>\n\n{text}",
+                parse_mode="HTML"
+            )
+            tmp.execute("UPDATE reminders SET sent=1 WHERE id=?", (row_id,))
+            tmp.commit()
+        except Exception as e:
+            logger.error(f"Reminder send error: {e}")
+    tmp.close()
+
+# ========= ГЕНЕРАЦИЯ МУЗЫКИ (Hugging Face) =========
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+
+async def generate_music_hf(prompt: str) -> bytes | None:
+    if not HF_TOKEN:
+        return None
+    try:
+        r = requests.post(
+            "https://api-inference.huggingface.co/models/facebook/musicgen-small",
+            headers={"Authorization": f"Bearer {HF_TOKEN}"},
+            json={"inputs": prompt},
+            timeout=120
+        )
+        if r.status_code == 200 and r.headers.get("content-type", "").startswith("audio"):
+            return r.content
+        logger.error(f"HF Music error: {r.status_code} {r.text[:200]}")
+        return None
+    except Exception as e:
+        logger.error(f"Music gen error: {e}")
+        return None
+
+# ========= ПРОСТОЙ AI-ЗАПРОС (без истории) =========
+async def ai_request_simple(prompt: str, max_tokens: int = 2000) -> str | None:
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {AI_TOKEN}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.7
+            },
+            timeout=45
+        )
+        data = r.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"ai_request_simple error: {e}")
+        return None
+
 # ========= ФОРМАТИРОВАНИЕ ОТВЕТА С КОДОМ =========
 def format_ai_reply_html(text: str) -> list:
     pattern = r"```(\w*)\n?([\s\S]*?)```"
@@ -630,6 +1046,8 @@ def menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏴 Начать диалог", callback_data="chat")],
         [InlineKeyboardButton("🏴 Голосовые сообщения", callback_data="voice")],
+        [InlineKeyboardButton("🎓 Клонирование голоса", callback_data="voice_gen")],
+        [InlineKeyboardButton("🛠 Инструменты", callback_data="tools")],
         [
             InlineKeyboardButton("🏴 Профиль", callback_data="profile"),
             InlineKeyboardButton("🏴 Рефералы", callback_data="referrals"),
@@ -640,6 +1058,36 @@ def menu():
         ],
         [InlineKeyboardButton("🏴 Купить запросы", callback_data="buy")],
         [InlineKeyboardButton("🏴 Выбор нейронки", callback_data="models")],
+    ])
+
+def tools_menu():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🖼 Анализ фото", callback_data="tool_img"),
+            InlineKeyboardButton("🖌 Редактор фото", callback_data="tool_edit"),
+        ],
+        [
+            InlineKeyboardButton("🌐 Перевод", callback_data="tool_translate"),
+            InlineKeyboardButton("☁️ Погода", callback_data="tool_weather"),
+        ],
+        [
+            InlineKeyboardButton("🔗 QR-код", callback_data="tool_qr"),
+            InlineKeyboardButton("📊 Excel", callback_data="tool_excel"),
+        ],
+        [
+            InlineKeyboardButton("🔍 Поиск", callback_data="tool_search"),
+            InlineKeyboardButton("📺 YouTube", callback_data="tool_youtube"),
+        ],
+        [
+            InlineKeyboardButton("📄 PDF", callback_data="tool_pdf"),
+            InlineKeyboardButton("🐍 Код", callback_data="tool_code"),
+        ],
+        [
+            InlineKeyboardButton("⏰ Напоминания", callback_data="tool_remind"),
+            InlineKeyboardButton("🧠 Память", callback_data="tool_memory"),
+        ],
+        [InlineKeyboardButton("🎵 Музыка AI", callback_data="tool_music")],
+        [InlineKeyboardButton("▪️ В меню", callback_data="menu")],
     ])
 
 def back():
@@ -775,8 +1223,32 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == "voice":
         context.user_data["voice_only"] = True
         context.user_data["chat"] = False
+        context.user_data.pop("voice_clone_step", None)
         await replace_msg(q.message,
             "<b>🏴‍☠️ Режим расшифровки голоса!\n\nОтправь голосовое — переведу в текст.</b>",
+            back()
+        )
+
+    elif q.data == "voice_gen":
+        if not FISH_AUDIO_TOKEN:
+            await replace_msg(q.message,
+                "<b>🎓 Клонирование голоса\n\n"
+                "⚠️ Функция не настроена.\n\n"
+                "Администратору нужно добавить переменную <code>FISH_AUDIO_TOKEN</code>.\n"
+                "Получить бесплатный ключ: fish.audio</b>",
+                back()
+            )
+            return
+        context.user_data["voice_clone_step"] = "waiting_sample"
+        context.user_data["voice_only"] = False
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>🎓 Клонирование голоса\n\n"
+            "Шаг 1 из 2: Отправь голосовое сообщение — образец голоса.\n\n"
+            "🏴 Советы для лучшего результата:\n"
+            "• Запись от 5 секунд и дольше\n"
+            "• Говори чётко, без шума\n"
+            "• Один человек в записи</b>",
             back()
         )
 
@@ -877,6 +1349,191 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 models_keyboard(model_id)
             )
 
+    elif q.data == "tools":
+        await replace_msg(q.message,
+            "<b>🛠 Инструменты\n\nВыбери что хочешь сделать:</b>",
+            tools_menu()
+        )
+
+    elif q.data == "tool_img":
+        context.user_data["tool"] = "img_analyze"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>🖼 Анализ фото\n\n📎 Отправь фотографию — Cosmo AI опишет что на ней.\n\n"
+            "Можешь добавить подпись к фото — например:\n"
+            "<i>«Что здесь изображено?»\n«Найди текст на картинке»\n«Оцени качество фото»</i></b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_edit":
+        context.user_data["tool"] = "photo_edit"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>🖌 Редактор фото\n\n📎 Отправь фото с подписью-командой:\n\n"
+            "• <i>черно-белое / чб</i>\n"
+            "• <i>зеркало / отразить</i>\n"
+            "• <i>повернуть 90</i>\n"
+            "• <i>размытие / blur</i>\n"
+            "• <i>резкость</i>\n"
+            "• <i>ярче / темнее</i>\n"
+            "• <i>контраст</i>\n"
+            "• <i>насыщенность</i>\n"
+            "• <i>инвертировать</i></b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_translate":
+        context.user_data["tool"] = "translate"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>🌐 Перевод текста\n\n✏️ Напиши текст для перевода.\n\n"
+            "Можешь указать язык в начале:\n"
+            "<i>«на английский: Привет мир»\n«на китайский: Как дела»\n«translate to spanish: hello»</i>\n\n"
+            "Без указания языка — переведу на английский.</b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_weather":
+        context.user_data["tool"] = "weather"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>☁️ Погода\n\n🏙 Напиши название города — покажу текущую погоду.\n\n"
+            "<i>Москва\nНью-Йорк\nLondon\nТокио</i></b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_qr":
+        context.user_data["tool"] = "qr"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>🔗 Генератор QR-кода\n\n✏️ Напиши текст или ссылку — создам QR-код.\n\n"
+            "<i>https://google.com\nМой контакт: @username\nЛюбой текст</i></b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_excel":
+        context.user_data["tool"] = "excel"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>📊 Генератор Excel-таблиц\n\n✏️ Опиши что нужно сгенерировать, например:\n\n"
+            "<i>«Таблица продаж за квартал с колонками: Месяц, Товар, Сумма»\n"
+            "«Расписание на неделю»\n"
+            "«Бюджет проекта»</i></b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_search":
+        context.user_data["tool"] = "search"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>🔍 Поиск в интернете\n\n✏️ Напиши поисковый запрос — найду актуальную информацию и сделаю краткую сводку.\n\n"
+            "<i>«новости Tesla сегодня»\n«лучшие рестораны Москвы»\n«как установить Python»</i></b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_youtube":
+        context.user_data["tool"] = "youtube"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>📺 Суммаризация YouTube\n\n🔗 Отправь ссылку на YouTube-видео — извлеку субтитры и сделаю краткое содержание.\n\n"
+            "<i>https://youtube.com/watch?v=...\nhttps://youtu.be/...</i>\n\n"
+            "⚠️ Работает только если у видео есть субтитры (RU/EN).</b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_pdf":
+        context.user_data["tool"] = "pdf"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>📄 Генератор PDF\n\n✏️ Опиши что нужно создать — сгенерирую готовый PDF-файл.\n\n"
+            "<i>«Резюме программиста»\n«Коммерческое предложение»\n«Реферат по истории»</i></b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_code":
+        context.user_data["tool"] = "run_code"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>🐍 Выполнение Python-кода\n\n✏️ Отправь код — выполню его и верну результат.\n\n"
+            "⚠️ Лимит: 10 секунд, только Python.\n"
+            "⚠️ Нет доступа к интернету и файловой системе.\n\n"
+            "Пример:\n<code>print(sum(range(1, 101)))</code></b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]])
+        )
+
+    elif q.data == "tool_remind":
+        reminders = get_user_reminders(user_id)
+        remind_text = "<b>⏰ Напоминания\n\n"
+        if reminders:
+            remind_text += "Активные напоминания:\n"
+            for r_id, r_at, r_text in reminders:
+                dt = r_at[:16].replace("T", " ")
+                remind_text += f"• {dt} — {r_text[:40]}\n"
+            remind_text += "\n"
+        else:
+            remind_text += "У тебя нет активных напоминаний.\n\n"
+        remind_text += (
+            "✏️ Напиши когда и что напомнить:\n\n"
+            "<i>«завтра в 10:00 позвонить маме»\n"
+            "«через 2 часа сделать зарядку»\n"
+            "«15.04 в 18:30 встреча»</i></b>"
+        )
+        context.user_data["tool"] = "remind"
+        context.user_data["chat"] = False
+        await replace_msg(q.message, remind_text,
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+
+    elif q.data == "tool_memory":
+        facts = get_user_facts(user_id)
+        mem_text = "<b>🧠 Память AI\n\n"
+        if facts:
+            mem_text += f"Cosmo AI знает о тебе ({len(facts)} фактов):\n\n"
+            for f in facts[:10]:
+                mem_text += f"• {f}\n"
+            mem_text += "\n"
+        else:
+            mem_text += "Память пуста — AI ничего о тебе не знает.\n\n"
+        mem_text += (
+            "✏️ Напиши что запомнить, например:\n"
+            "<i>«Меня зовут Алексей, мне 25 лет»\n"
+            "«Я программист, люблю Python»\n"
+            "«Живу в Москве»</i></b>"
+        )
+        context.user_data["tool"] = "memory"
+        context.user_data["chat"] = False
+        await replace_msg(q.message, mem_text,
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Очистить память", callback_data="tool_memory_clear")],
+                [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+            ]))
+
+    elif q.data == "tool_memory_clear":
+        clear_user_facts(user_id)
+        await replace_msg(q.message,
+            "<b>🧠 Память очищена.\n\nAI больше ничего о тебе не знает.</b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+
+    elif q.data == "tool_music":
+        if not HF_TOKEN:
+            await replace_msg(q.message,
+                "<b>🎵 Генерация музыки\n\n"
+                "⚠️ Функция не настроена.\n\n"
+                "Администратору нужно добавить переменную <code>HF_TOKEN</code>.\n"
+                "Бесплатный ключ: huggingface.co → Profile → Access Tokens</b>",
+                InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+            return
+        context.user_data["tool"] = "music"
+        context.user_data["chat"] = False
+        await replace_msg(q.message,
+            "<b>🎵 Генерация музыки AI\n\n✏️ Опиши стиль и настроение музыки:\n\n"
+            "<i>«upbeat electronic dance music»\n"
+            "«calm acoustic guitar, peaceful»\n"
+            "«epic orchestral, cinematic»\n"
+            "«lo-fi hip hop, chill beats»</i>\n\n"
+            "⏳ Генерация занимает 30–60 секунд.\n"
+            "⚠️ Описание лучше писать на английском.</b>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+
 # ========= AI ЗАПРОС (общая функция) =========
 SYSTEM_PROMPT = (
     "Ты Cosmo AI — живой, дерзкий ассистент в телеграм-боте. "
@@ -929,6 +1586,12 @@ SURVEY_SYSTEM_PROMPT = (
 async def ask_ai(user_id, history, system_override=None):
     selected_model = get_user_model(user_id)
     sys_prompt = system_override if system_override else SYSTEM_PROMPT
+    # Добавляем факты из памяти пользователя
+    if not system_override:
+        facts = get_user_facts(user_id)
+        if facts:
+            memory_block = "\n\nЧто ты знаешь о пользователе (используй в диалоге):\n" + "\n".join(f"- {f}" for f in facts)
+            sys_prompt = sys_prompt + memory_block
     messages = [{"role": "system", "content": sys_prompt}] + history
 
     if is_openrouter_model(selected_model):
@@ -1006,6 +1669,317 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
+
+    # ======= РЕЖИМ КЛОНИРОВАНИЯ: ждём текст для озвучки =======
+    if context.user_data.get("voice_clone_step") == "waiting_text":
+        sample_bytes = context.user_data.get("voice_clone_sample")
+        if not sample_bytes:
+            context.user_data.pop("voice_clone_step", None)
+            await update.message.reply_text(
+                "<b>🏴 Образец не найден. Начни сначала через меню.</b>",
+                parse_mode="HTML", reply_markup=back()
+            )
+            return
+
+        cursor.execute("SELECT requests FROM users WHERE user_id=?", (user_id,))
+        r = cursor.fetchone()
+        if not r or r[0] <= 0:
+            await update.message.reply_text(
+                "<b>🏴‍☠️ Запросы закончились! Купи ещё или пригласи друзей.</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏴‍☠️ Купить", callback_data="buy")]])
+            )
+            return
+
+        status_msg = await update.message.reply_text(
+            "<b>🎓 Клонирую голос и генерирую речь...\n⏳ Это займёт 15–30 секунд.</b>",
+            parse_mode="HTML"
+        )
+        try:
+            audio_bytes = await clone_voice_and_speak(sample_bytes, text)
+
+            cursor.execute("UPDATE users SET requests = requests - 1, total_used = total_used + 1 WHERE user_id=?", (user_id,))
+            conn.commit()
+
+            await status_msg.delete()
+
+            if audio_bytes:
+                audio_buf = io.BytesIO(audio_bytes)
+                audio_buf.name = "voice_clone.mp3"
+                await update.message.reply_audio(
+                    audio=audio_buf,
+                    caption="<b>🎓 Голос склонирован! Вот результат.</b>",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🎓 Ещё текст", callback_data="voice_gen")],
+                        [InlineKeyboardButton("▪️ В меню", callback_data="menu")],
+                    ])
+                )
+            else:
+                await update.message.reply_text(
+                    "<b>🏴 Не удалось сгенерировать голос.\n\n"
+                    "Возможные причины:\n"
+                    "• Образец слишком короткий (нужно 5+ сек)\n"
+                    "• Проблемы с API ElevenLabs\n"
+                    "• Превышен лимит бесплатного плана</b>",
+                    parse_mode="HTML", reply_markup=back()
+                )
+        except Exception as e:
+            logger.error(f"Voice clone text error: {e}")
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await update.message.reply_text(
+                "<b>🏴 Ошибка клонирования голоса. Попробуй позже.</b>",
+                parse_mode="HTML", reply_markup=back()
+            )
+
+        # Сбрасываем состояние после генерации
+        context.user_data.pop("voice_clone_step", None)
+        context.user_data.pop("voice_clone_sample", None)
+        return
+
+    # ======= ИНСТРУМЕНТЫ: обработка текстового ввода =======
+    active_tool = context.user_data.get("tool")
+
+    if active_tool == "weather":
+        context.user_data.pop("tool", None)
+        msg = await update.message.reply_text("<b>☁️ Получаю данные о погоде...</b>", parse_mode="HTML")
+        result = get_weather(text.strip())
+        await msg.delete()
+        if result:
+            await update.message.reply_text(result, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("☁️ Другой город", callback_data="tool_weather")],
+                    [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                ]))
+        else:
+            await update.message.reply_text(
+                "<b>☁️ Не удалось получить погоду. Проверь название города.</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    if active_tool == "qr":
+        context.user_data.pop("tool", None)
+        qr_bytes = generate_qr(text.strip())
+        if qr_bytes:
+            buf = io.BytesIO(qr_bytes)
+            buf.name = "qr.png"
+            await update.message.reply_photo(photo=buf, caption=f"<b>🔗 QR-код для:</b>\n<code>{text[:100]}</code>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔗 Ещё QR", callback_data="tool_qr")],
+                    [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                ]))
+        else:
+            await update.message.reply_text("<b>🔗 Ошибка генерации QR-кода.</b>", parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    if active_tool == "translate":
+        context.user_data.pop("tool", None)
+        msg = await update.message.reply_text("<b>🌐 Перевожу...</b>", parse_mode="HTML")
+        prompt = f"Переведи следующий текст. Если в начале указан язык — переведи на него. Если не указан — переведи на английский. Верни ТОЛЬКО перевод без пояснений.\n\nТекст: {text}"
+        translated = await ai_request_simple(prompt)
+        await msg.delete()
+        if translated:
+            await update.message.reply_text(
+                f"<b>🌐 Перевод:</b>\n\n{translated}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🌐 Ещё перевод", callback_data="tool_translate")],
+                    [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                ]))
+        else:
+            await update.message.reply_text("<b>🌐 Ошибка перевода.</b>", parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    if active_tool == "search":
+        context.user_data.pop("tool", None)
+        msg = await update.message.reply_text("<b>🔍 Ищу в интернете...</b>", parse_mode="HTML")
+        raw = search_web(text.strip())
+        if raw:
+            summary_prompt = f"На основе этих результатов поиска сделай краткую, информативную сводку на русском языке:\n\n{raw}"
+            summary = await ai_request_simple(summary_prompt)
+            await msg.delete()
+            reply = f"<b>🔍 По запросу «{text[:50]}»:</b>\n\n{summary or raw[:1500]}"
+            await update.message.reply_text(reply, parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Новый поиск", callback_data="tool_search")],
+                    [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                ]))
+        else:
+            await msg.delete()
+            await update.message.reply_text("<b>🔍 Ничего не найдено.</b>", parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    if active_tool == "youtube":
+        context.user_data.pop("tool", None)
+        msg = await update.message.reply_text("<b>📺 Получаю субтитры видео...</b>", parse_mode="HTML")
+        transcript = get_youtube_transcript(text.strip())
+        if transcript:
+            await msg.edit_text("<b>📺 Анализирую содержимое...</b>", parse_mode="HTML")
+            summary_prompt = f"Сделай подробное краткое содержание этого видео на русском языке. Выдели главные мысли и ключевые моменты:\n\n{transcript}"
+            summary = await ai_request_simple(summary_prompt)
+            await msg.delete()
+            await update.message.reply_text(
+                f"<b>📺 Краткое содержание видео:</b>\n\n{summary or 'Не удалось обработать'}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📺 Другое видео", callback_data="tool_youtube")],
+                    [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                ]))
+        else:
+            await msg.delete()
+            await update.message.reply_text(
+                "<b>📺 Не удалось получить субтитры.\n\nВозможные причины:\n• Субтитры отключены\n• Видео недоступно\n• Неверная ссылка</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    if active_tool == "pdf":
+        context.user_data.pop("tool", None)
+        msg = await update.message.reply_text("<b>📄 Генерирую PDF...</b>", parse_mode="HTML")
+        content_prompt = f"Создай подробный структурированный документ по теме: {text}\n\nИспользуй заголовки (# Заголовок 1, ## Заголовок 2), параграфы. Пиши на русском языке."
+        content = await ai_request_simple(content_prompt)
+        if content:
+            pdf_bytes = build_pdf(content, text[:50])
+            await msg.delete()
+            if pdf_bytes:
+                buf = io.BytesIO(pdf_bytes)
+                buf.name = "document.pdf"
+                await update.message.reply_document(document=buf, filename="document.pdf",
+                    caption=f"<b>📄 PDF: {text[:50]}</b>",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📄 Ещё PDF", callback_data="tool_pdf")],
+                        [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                    ]))
+            else:
+                await update.message.reply_text("<b>📄 Ошибка генерации PDF.</b>", parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        else:
+            await msg.delete()
+            await update.message.reply_text("<b>📄 Ошибка генерации контента.</b>", parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    if active_tool == "excel":
+        context.user_data.pop("tool", None)
+        msg = await update.message.reply_text("<b>📊 Генерирую таблицу...</b>", parse_mode="HTML")
+        table_prompt = f"Создай таблицу в формате Markdown (используй | для разделения колонок) по теме: {text}\n\nПервая строка — заголовки. Создай 10-15 строк с реалистичными данными."
+        content = await ai_request_simple(table_prompt)
+        if content:
+            xl_bytes = build_excel(content, text[:30])
+            await msg.delete()
+            if xl_bytes:
+                buf = io.BytesIO(xl_bytes)
+                buf.name = "table.xlsx"
+                await update.message.reply_document(document=buf, filename="table.xlsx",
+                    caption=f"<b>📊 Excel: {text[:50]}</b>",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📊 Ещё таблицу", callback_data="tool_excel")],
+                        [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                    ]))
+            else:
+                await update.message.reply_text("<b>📊 Ошибка создания Excel.</b>", parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        else:
+            await msg.delete()
+            await update.message.reply_text("<b>📊 Ошибка генерации данных.</b>", parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    if active_tool == "run_code":
+        context.user_data.pop("tool", None)
+        clean_code = text.strip().strip("```python").strip("```").strip()
+        msg = await update.message.reply_text("<b>🐍 Запускаю код...</b>", parse_mode="HTML")
+        result = await run_code_sandbox(clean_code)
+        await msg.delete()
+        await update.message.reply_text(
+            f"<b>🐍 Результат:</b>\n\n{result}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🐍 Запустить ещё", callback_data="tool_code")],
+                [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+            ]))
+        return
+
+    if active_tool == "memory":
+        context.user_data.pop("tool", None)
+        save_user_fact(user_id, text.strip())
+        await update.message.reply_text(
+            f"<b>🧠 Запомнил:</b>\n\n<i>{text[:200]}</i>\n\nAI будет использовать это в диалоге.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧠 Добавить ещё", callback_data="tool_memory")],
+                [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+            ]))
+        return
+
+    if active_tool == "remind":
+        context.user_data.pop("tool", None)
+        msg = await update.message.reply_text("<b>⏰ Разбираю время напоминания...</b>", parse_mode="HTML")
+        parse_prompt = (
+            f"Сегодня: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}.\n"
+            f"Пользователь написал: «{text}»\n\n"
+            "Извлеки дату/время и текст напоминания. Верни JSON:\n"
+            '{"datetime": "YYYY-MM-DDTHH:MM", "text": "текст напоминания"}\n'
+            "Только JSON, без пояснений."
+        )
+        parsed = await ai_request_simple(parse_prompt)
+        await msg.delete()
+        try:
+            import json as _json
+            parsed_clean = parsed.strip().strip("```json").strip("```").strip()
+            data = _json.loads(parsed_clean)
+            remind_dt = data["datetime"]
+            remind_text = data["text"]
+            add_reminder(user_id, remind_dt, remind_text)
+            dt_display = remind_dt[:16].replace("T", " в ")
+            await update.message.reply_text(
+                f"<b>⏰ Напоминание установлено!</b>\n\n📅 Когда: <b>{dt_display}</b>\n📝 Что: {remind_text}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⏰ Ещё напоминание", callback_data="tool_remind")],
+                    [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                ]))
+        except Exception as e:
+            logger.error(f"Reminder parse error: {e}, raw: {parsed}")
+            await update.message.reply_text(
+                "<b>⏰ Не смог разобрать время. Попробуй написать иначе:\n\n"
+                "<i>«завтра в 15:00 позвонить»\n«через 2 часа сделать кофе»</i></b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    if active_tool == "music":
+        context.user_data.pop("tool", None)
+        msg = await update.message.reply_text(
+            "<b>🎵 Генерирую музыку...\n⏳ Это займёт 30–60 секунд.</b>", parse_mode="HTML")
+        audio_bytes = await generate_music_hf(text.strip())
+        await msg.delete()
+        if audio_bytes:
+            buf = io.BytesIO(audio_bytes)
+            buf.name = "music.wav"
+            await update.message.reply_audio(audio=buf,
+                caption=f"<b>🎵 Музыка по запросу:</b>\n<i>{text[:100]}</i>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🎵 Ещё музыку", callback_data="tool_music")],
+                    [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                ]))
+        else:
+            await update.message.reply_text(
+                "<b>🎵 Ошибка генерации. Возможно, модель загружается — попробуй через минуту.</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
 
     # Проверка: просто ID проекта (или ID + ключевое слово)
     project_id_candidate = extract_project_id_from_text(text)
@@ -1250,6 +2224,37 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT banned FROM users WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
     if not row or row[0] == 1:
+        return
+
+    # ======= РЕЖИМ КЛОНИРОВАНИЯ: ждём образец голоса =======
+    if context.user_data.get("voice_clone_step") == "waiting_sample":
+        status_msg = await update.message.reply_text(
+            "<b>🎓 Образец получен, сохраняю...</b>", parse_mode="HTML"
+        )
+        try:
+            voice = update.message.voice
+            file = await context.bot.get_file(voice.file_id)
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+                tmp_path = tmp.name
+            await file.download_to_drive(tmp_path)
+            with open(tmp_path, "rb") as f:
+                sample_bytes = f.read()
+            os.unlink(tmp_path)
+
+            context.user_data["voice_clone_sample"] = sample_bytes
+            context.user_data["voice_clone_step"] = "waiting_text"
+
+            await status_msg.edit_text(
+                "<b>🎓 Отлично! Образец голоса принят.\n\n"
+                "Шаг 2 из 2: Теперь напиши текст, который нужно озвучить этим голосом.</b>",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Voice clone sample error: {e}")
+            await status_msg.edit_text(
+                "<b>🏴 Не удалось сохранить образец. Попробуй ещё раз.</b>",
+                parse_mode="HTML"
+            )
         return
 
     voice_only = context.user_data.get("voice_only", False)
@@ -1699,6 +2704,93 @@ async def check_payments(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Payment check error: {e}")
 
+# ========= ОБРАБОТЧИК ФОТОГРАФИЙ =========
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cursor.execute("SELECT banned FROM users WHERE user_id=?", (user_id,))
+    row = cursor.fetchone()
+    if not row or row[0] == 1:
+        return
+
+    active_tool = context.user_data.get("tool")
+    caption = (update.message.caption or "").strip()
+
+    # Скачиваем фото
+    try:
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await file.download_to_drive(tmp_path)
+        with open(tmp_path, "rb") as f:
+            image_bytes = f.read()
+        os.unlink(tmp_path)
+    except Exception as e:
+        logger.error(f"Photo download error: {e}")
+        await update.message.reply_text("<b>🏴 Не удалось загрузить фото.</b>", parse_mode="HTML")
+        return
+
+    # Режим редактирования фото
+    if active_tool == "photo_edit":
+        if not caption:
+            await update.message.reply_text(
+                "<b>🖌 Добавь подпись к фото с командой редактирования.\n\n"
+                "Пример: отправь фото с подписью «черно-белое»</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+            return
+        edited = edit_photo_pillow(image_bytes, caption)
+        if edited:
+            buf = io.BytesIO(edited)
+            buf.name = "edited.jpg"
+            await update.message.reply_photo(photo=buf,
+                caption=f"<b>🖌 Готово: {caption}</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🖌 Ещё правку", callback_data="tool_edit")],
+                    [InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]
+                ]))
+        else:
+            await update.message.reply_text(
+                "<b>🖌 Команда не распознана. Попробуй:\nчерно-белое, зеркало, ярче, темнее, контраст, размытие, резкость, инвертировать</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▪️ Инструменты", callback_data="tools")]]))
+        return
+
+    # Режим анализа фото (или авто при любом фото)
+    cursor.execute("SELECT requests FROM users WHERE user_id=?", (user_id,))
+    req_row = cursor.fetchone()
+    if not req_row or req_row[0] <= 0:
+        await update.message.reply_text(
+            "<b>🏴‍☠️ Запросы закончились! Купи ещё или пригласи друзей.</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏴‍☠️ Купить", callback_data="buy")]]))
+        return
+
+    analyze_prompt = caption if caption else "Опиши подробно что изображено на этом фото"
+    msg = await update.message.reply_text("<b>🖼 Анализирую изображение...</b>", parse_mode="HTML")
+
+    result = await analyze_image_with_ai(image_bytes, analyze_prompt)
+    cursor.execute("UPDATE users SET requests = requests - 1, total_used = total_used + 1 WHERE user_id=?", (user_id,))
+    conn.commit()
+
+    await msg.delete()
+    if result:
+        await update.message.reply_text(
+            f"<b>🖼 Анализ изображения:</b>\n\n{result}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🖼 Анализ ещё", callback_data="tool_img")],
+                [InlineKeyboardButton("▪️ В меню", callback_data="menu")]
+            ]))
+    else:
+        await update.message.reply_text(
+            "<b>🖼 Не удалось проанализировать изображение. Попробуй ещё раз.</b>",
+            parse_mode="HTML", reply_markup=back())
+
+    if active_tool == "img_analyze":
+        context.user_data.pop("tool", None)
+
 # ========= ЗАПУСК =========
 async def post_init(application):
     await application.bot.set_my_commands([
@@ -1727,9 +2819,11 @@ def main():
 
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat), group=1)
 
     app.job_queue.run_repeating(check_payments, interval=15)
+    app.job_queue.run_repeating(check_reminders_job, interval=30)
 
     logger.info("🏴‍☠️ Cosmo AI Bot запущен!")
     app.run_polling(drop_pending_updates=True)
